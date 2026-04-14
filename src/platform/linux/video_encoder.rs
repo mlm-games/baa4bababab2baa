@@ -89,7 +89,7 @@ fn encode_loop(
     let _ = config;
     let _ = queue;
     let _ = pkt_tx.send(Err(Error::Platform(
-        "cros-codecs encoder not yet implemented; waiting for stable API".into(),
+        "Linux VAAPI encoder not yet implemented. Enable linux feature with VAAPI runtime.".into(),
     )));
 
     while frame_rx.blocking_recv().is_some() {}

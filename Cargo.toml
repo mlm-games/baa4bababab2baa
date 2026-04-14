@@ -7,8 +7,8 @@ edition = "2024"
 default = []
 web-codecs  = ["dep:web-codecs"]
 android     = ["dep:mediacodec"]
-linux       = ["dep:cros-codecs"]
-apple       = ["dep:videotoolbox-rs"]
+linux       = ["dep:cros-codecs", "cros-codecs/vaapi"]
+apple       = []
 
 [dependencies]
 thiserror = "2"
@@ -25,9 +25,12 @@ wasm-bindgen-futures = "0.4"
 mediacodec = { version = "0.1", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-cros-codecs = { version = "0.0.6", optional = true }
+cros-codecs = { version = "0.0.6", optional = true, default-features = false }
 
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+[target.'cfg(target_os = "macos")'.dependencies]
+videotoolbox-rs = { version = "0.1", optional = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
 videotoolbox-rs = { version = "0.1", optional = true }
 
 [profile.dev]
