@@ -4,5 +4,5 @@ pub mod wasm;
 #[cfg(target_os = "android")]
 pub mod android;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "linux"))]
 pub mod linux;
