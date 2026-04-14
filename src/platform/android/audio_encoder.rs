@@ -58,8 +58,8 @@ impl AudioEncoderOutput for AndroidAudioEncoderOutput {
 pub fn create(
     config: AudioEncoderConfig,
 ) -> Result<(AndroidAudioEncoderInput, AndroidAudioEncoderOutput), Error> {
-    let mut format = MediaFormat::new()
-        .ok_or_else(|| Error::Platform("Failed to create MediaFormat".into()))?;
+    let mut format =
+        MediaFormat::new().ok_or_else(|| Error::Platform("Failed to create MediaFormat".into()))?;
     format.set_string("mime", &config.codec.0);
     format.set_i32("channel-count", config.channels as i32);
     format.set_i32("sample-rate", config.sample_rate as i32);
@@ -86,7 +86,11 @@ pub fn create(
     thread::spawn(move || audio_encode_loop(codec, frame_rx, pkt_tx, queue2));
 
     Ok((
-        AndroidAudioEncoderInput { tx: frame_tx, queue, config },
+        AndroidAudioEncoderInput {
+            tx: frame_tx,
+            queue,
+            config,
+        },
         AndroidAudioEncoderOutput { rx: pkt_rx },
     ))
 }

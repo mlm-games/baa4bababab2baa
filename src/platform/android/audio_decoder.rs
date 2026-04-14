@@ -49,8 +49,8 @@ impl AudioDecoderOutput for AndroidAudioDecoderOutput {
 pub fn create(
     config: AudioDecoderConfig,
 ) -> Result<(AndroidAudioDecoderInput, AndroidAudioDecoderOutput), Error> {
-    let mut format = MediaFormat::new()
-        .ok_or_else(|| Error::Platform("Failed to create MediaFormat".into()))?;
+    let mut format =
+        MediaFormat::new().ok_or_else(|| Error::Platform("Failed to create MediaFormat".into()))?;
     format.set_string("mime", &config.codec.0);
     format.set_i32("channel-count", config.channel_count as i32);
     format.set_i32("sample-rate", config.sample_rate as i32);
@@ -59,8 +59,12 @@ pub fn create(
     let mut codec = MediaCodec::create_decoder(&mime)
         .ok_or_else(|| Error::Platform(format!("No audio decoder for {mime}")))?;
 
-    codec.init(&format, None, 0).map_err(|e| Error::Platform(format!("{e:?}")))?;
-    codec.start().map_err(|e| Error::Platform(format!("{e:?}")))?;
+    codec
+        .init(&format, None, 0)
+        .map_err(|e| Error::Platform(format!("{e:?}")))?;
+    codec
+        .start()
+        .map_err(|e| Error::Platform(format!("{e:?}")))?;
 
     let (pkt_tx, pkt_rx) = mpsc::unbounded_channel::<EncodedAudioPacket>();
     let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Result<AudioFrame, Error>>();

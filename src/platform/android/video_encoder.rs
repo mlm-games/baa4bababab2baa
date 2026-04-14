@@ -61,8 +61,8 @@ impl VideoEncoderOutput for AndroidVideoEncoderOutput {
 pub fn create(
     config: VideoEncoderConfig,
 ) -> Result<(AndroidVideoEncoderInput, AndroidVideoEncoderOutput), Error> {
-    let mut format = MediaFormat::new()
-        .ok_or_else(|| Error::Platform("Failed to create MediaFormat".into()))?;
+    let mut format =
+        MediaFormat::new().ok_or_else(|| Error::Platform("Failed to create MediaFormat".into()))?;
 
     format.set_string("mime", &config.codec.0);
     format.set_i32("width", config.dimensions.width as i32);

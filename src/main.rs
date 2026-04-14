@@ -1,5 +1,5 @@
 use baabaabaabaabababbababbaa::{
-    default_host, Dimensions, VideoCodecId, VideoDecoderConfig, VideoEncoderConfig,
+    Dimensions, VideoCodecId, VideoDecoderConfig, VideoEncoderConfig, default_host,
 };
 
 fn main() {

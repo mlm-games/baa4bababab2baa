@@ -1,9 +1,13 @@
-use web_codecs::{EncodedFrame, VideoDecoded, VideoDecoder, VideoDecoderConfig as WcVideoDecoderConfig};
+use web_codecs::{
+    EncodedFrame, VideoDecoded, VideoDecoder, VideoDecoderConfig as WcVideoDecoderConfig,
+};
 
 use crate::{
     error::Error,
     traits::{VideoDecoderInput, VideoDecoderOutput},
-    types::{Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoFrame, VideoPlanes},
+    types::{
+        Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoFrame, VideoPlanes,
+    },
 };
 
 fn to_wc_config(cfg: &VideoDecoderConfig) -> WcVideoDecoderConfig {

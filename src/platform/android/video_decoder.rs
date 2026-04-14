@@ -6,7 +6,9 @@ use tokio::sync::mpsc;
 use crate::{
     error::Error,
     traits::{VideoDecoderInput, VideoDecoderOutput},
-    types::{Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoFrame, VideoPlanes},
+    types::{
+        Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoFrame, VideoPlanes,
+    },
 };
 
 pub struct AndroidVideoDecoderInput {
@@ -49,8 +51,8 @@ impl VideoDecoderOutput for AndroidVideoDecoderOutput {
 pub fn create(
     config: VideoDecoderConfig,
 ) -> Result<(AndroidVideoDecoderInput, AndroidVideoDecoderOutput), Error> {
-    let mut format = MediaFormat::new()
-        .ok_or_else(|| Error::Platform("Failed to create MediaFormat".into()))?;
+    let mut format =
+        MediaFormat::new().ok_or_else(|| Error::Platform("Failed to create MediaFormat".into()))?;
     format.set_string("mime", &config.codec.0);
 
     if let Some(res) = config.resolution {

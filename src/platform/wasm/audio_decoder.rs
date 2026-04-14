@@ -1,4 +1,6 @@
-use web_codecs::{AudioDecoded, AudioDecoder, AudioDecoderConfig as WcAudioDecoderConfig, EncodedFrame};
+use web_codecs::{
+    AudioDecoded, AudioDecoder, AudioDecoderConfig as WcAudioDecoderConfig, EncodedFrame,
+};
 
 use crate::{
     error::Error,
@@ -48,14 +50,10 @@ pub struct WasmAudioDecoderOutput {
 
 impl AudioDecoderOutput for WasmAudioDecoderOutput {
     async fn frame(&mut self) -> Result<Option<AudioFrame>, Error> {
-        let opt = self
-            .inner
-            .next()
-            .await
-            .map_err(|e| match e {
-                web_codecs::Error::Dropped => Error::Dropped,
-                other => Error::Platform(format!("{other:?}")),
-            })?;
+        let opt = self.inner.next().await.map_err(|e| match e {
+            web_codecs::Error::Dropped => Error::Dropped,
+            other => Error::Platform(format!("{other:?}")),
+        })?;
 
         let Some(wc_frame) = opt else {
             return Ok(None);
@@ -71,17 +69,18 @@ impl AudioDecoderOutput for WasmAudioDecoderOutput {
         let mut channel_buf = vec![0.0f32; frames];
         for ch in 0..channels as usize {
             wc_frame
-                .copy_to(&mut channel_buf[..], ch, web_codecs::AudioCopyOptions::default())
+                .copy_to(
+                    &mut channel_buf[..],
+                    ch,
+                    web_codecs::AudioCopyOptions::default(),
+                )
                 .map_err(|e| Error::Platform(format!("{e:?}")))?;
             for (i, s) in channel_buf.iter().enumerate() {
                 interleaved[i * channels as usize + ch] = *s;
             }
         }
 
-        let bytes: Vec<u8> = interleaved
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = interleaved.iter().flat_map(|f| f.to_le_bytes()).collect();
 
         Ok(Some(AudioFrame {
             timestamp,

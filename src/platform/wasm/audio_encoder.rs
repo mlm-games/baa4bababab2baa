@@ -1,4 +1,6 @@
-use web_codecs::{AudioData, AudioDecoded, AudioEncoded, AudioEncoder, AudioEncoderConfig as WcAudioEncoderConfig};
+use web_codecs::{
+    AudioData, AudioDecoded, AudioEncoded, AudioEncoder, AudioEncoderConfig as WcAudioEncoderConfig,
+};
 
 use crate::{
     error::Error,
@@ -92,14 +94,10 @@ pub struct WasmAudioEncoderOutput {
 
 impl AudioEncoderOutput for WasmAudioEncoderOutput {
     async fn packet(&mut self) -> Result<Option<EncodedAudioPacket>, Error> {
-        let pkt = self
-            .inner
-            .frame()
-            .await
-            .map_err(|e| match e {
-                web_codecs::Error::Dropped => Error::Dropped,
-                other => Error::Platform(format!("{other:?}")),
-            })?;
+        let pkt = self.inner.frame().await.map_err(|e| match e {
+            web_codecs::Error::Dropped => Error::Dropped,
+            other => Error::Platform(format!("{other:?}")),
+        })?;
 
         if let Some(wc_cfg) = self.inner.config() {
             self.decoder_cfg = Some(AudioDecoderConfig {

@@ -7,14 +7,18 @@ mod audio;
 mod video_decoder;
 mod video_encoder;
 
-pub use audio::{CrosAudioDecoderInput, CrosAudioDecoderOutput, CrosAudioEncoderInput, CrosAudioEncoderOutput};
+pub use audio::{
+    CrosAudioDecoderInput, CrosAudioDecoderOutput, CrosAudioEncoderInput, CrosAudioEncoderOutput,
+};
 pub use video_decoder::{CrosVideoDecoderInput, CrosVideoDecoderOutput};
 pub use video_encoder::{CrosVideoEncoderInput, CrosVideoEncoderOutput};
 
 pub struct CrosCodecsHost;
 
 impl CrosCodecsHost {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     pub fn create_video_decoder(
         &self,
@@ -44,19 +48,31 @@ impl CrosCodecsHost {
         Ok((CrosAudioDecoderInput, CrosAudioDecoderOutput))
     }
 
-    pub async fn is_video_decoder_supported(&self, _config: &VideoDecoderConfig) -> Result<bool, Error> {
+    pub async fn is_video_decoder_supported(
+        &self,
+        _config: &VideoDecoderConfig,
+    ) -> Result<bool, Error> {
         Ok(true)
     }
 
-    pub async fn is_video_encoder_supported(&self, _config: &VideoEncoderConfig) -> Result<bool, Error> {
+    pub async fn is_video_encoder_supported(
+        &self,
+        _config: &VideoEncoderConfig,
+    ) -> Result<bool, Error> {
         Ok(false)
     }
 
-    pub async fn is_audio_encoder_supported(&self, _config: &AudioEncoderConfig) -> Result<bool, Error> {
+    pub async fn is_audio_encoder_supported(
+        &self,
+        _config: &AudioEncoderConfig,
+    ) -> Result<bool, Error> {
         Ok(false)
     }
 
-    pub async fn is_audio_decoder_supported(&self, _config: &AudioDecoderConfig) -> Result<bool, Error> {
+    pub async fn is_audio_decoder_supported(
+        &self,
+        _config: &AudioDecoderConfig,
+    ) -> Result<bool, Error> {
         Ok(false)
     }
 }

@@ -5,7 +5,7 @@ pub mod traits;
 pub mod types;
 
 pub use error::Error;
-pub use host::{default_host, host_from_id, Host, HostId};
+pub use host::{Host, HostId, default_host, host_from_id};
 pub use traits::{
     AudioDecoderInput, AudioDecoderOutput, AudioEncoderInput, AudioEncoderOutput,
     VideoDecoderInput, VideoDecoderOutput, VideoEncoderInput, VideoEncoderOutput,

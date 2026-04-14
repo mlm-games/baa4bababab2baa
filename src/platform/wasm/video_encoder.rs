@@ -45,7 +45,7 @@ impl VideoEncoderInput for WasmVideoEncoderInput {
             VideoPlanes::Hardware => {
                 return Err(Error::InvalidConfig(
                     "Cannot re-encode a hardware VideoFrame on WASM".into(),
-                ))
+                ));
             }
             VideoPlanes::Cpu(data) => build_wasm_frame(&data, &frame.dimensions, frame.timestamp)?,
         };
@@ -104,19 +104,17 @@ pub struct WasmVideoEncoderOutput {
 
 impl VideoEncoderOutput for WasmVideoEncoderOutput {
     async fn packet(&mut self) -> Result<Option<EncodedVideoPacket>, Error> {
-        let pkt = self
-            .inner
-            .frame()
-            .await
-            .map_err(|e| match e {
-                web_codecs::Error::Dropped => Error::Dropped,
-                other => Error::Platform(format!("{other:?}")),
-            })?;
+        let pkt = self.inner.frame().await.map_err(|e| match e {
+            web_codecs::Error::Dropped => Error::Dropped,
+            other => Error::Platform(format!("{other:?}")),
+        })?;
 
         if let Some(wc_cfg) = self.inner.config() {
             self.decoder_cfg = Some(VideoDecoderConfig {
                 codec: crate::types::VideoCodecId(wc_cfg.codec.clone()),
-                resolution: wc_cfg.resolution.map(|d| Dimensions::new(d.width, d.height)),
+                resolution: wc_cfg
+                    .resolution
+                    .map(|d| Dimensions::new(d.width, d.height)),
                 description: wc_cfg.description.clone(),
                 hardware_acceleration: wc_cfg.hardware_acceleration,
             });
