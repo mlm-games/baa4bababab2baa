@@ -1,6 +1,6 @@
 use std::thread;
 
-use mediacodec::{MediaCodec, MediaFormat};
+use mediacodec::{CodecInputBuffer, CodecOutputBuffer, MediaCodec, MediaFormat, SampleFormat as McSampleFormat};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -87,7 +87,8 @@ fn audio_decode_loop(
 ) {
     loop {
         if let Ok(pkt) = pkt_rx.try_recv() {
-            if let Ok(mut buf) = codec.dequeue_input() {
+            if let Ok(buf) = codec.dequeue_input() {
+                let buf: CodecInputBuffer = buf;
                 let (ptr, cap) = buf.buffer();
                 let copy_len = pkt.payload.len().min(cap);
                 unsafe {
@@ -99,20 +100,23 @@ fn audio_decode_loop(
             }
         }
 
-        while let Ok(out) = codec.dequeue_output() {
-            let fmt = out.format();
+        let out: Result<CodecOutputBuffer, _> = codec.dequeue_output();
+        if let Ok(out_buf) = out {
+            let out_buf: CodecOutputBuffer = out_buf;
+            let fmt = out_buf.format();
             let channels = fmt.get_i32("channel-count").unwrap_or(2) as u32;
             let sample_rate = fmt.get_i32("sample-rate").unwrap_or(48_000) as u32;
-            let ts = std::time::Duration::from_micros(out.info().presentation_time_us as u64);
+            let ts = std::time::Duration::from_micros(out_buf.info().presentation_time_us as u64);
 
-            if let Some(mediacodec::Frame::Audio(audio)) = out.frame() {
-                let (format, samples) = match audio.format() {
-                    mediacodec::SampleFormat::S16(buf) => {
-                        let bytes: Vec<u8> = buf.iter().flat_map(|s| s.to_le_bytes()).collect();
+            if let Some(mediacodec::Frame::Audio(audio)) = out_buf.frame() {
+                let audio_fmt = audio.format();
+                let (fmt_out, samples) = match audio_fmt {
+                    McSampleFormat::S16(buf) => {
+                        let bytes: Vec<u8> = buf.iter().flat_map(|s| i16::to_le_bytes(s)).collect();
                         (SampleFormat::S16, bytes)
                     }
-                    mediacodec::SampleFormat::F32(buf) => {
-                        let bytes: Vec<u8> = buf.iter().flat_map(|s| s.to_le_bytes()).collect();
+                    McSampleFormat::F32(buf) => {
+                        let bytes: Vec<u8> = buf.iter().flat_map(|s| f32::to_le_bytes(s)).collect();
                         (SampleFormat::F32, bytes)
                     }
                 };
@@ -121,7 +125,7 @@ fn audio_decode_loop(
                     timestamp: ts,
                     sample_rate,
                     channels,
-                    format,
+                    format: fmt_out,
                     samples,
                 };
 

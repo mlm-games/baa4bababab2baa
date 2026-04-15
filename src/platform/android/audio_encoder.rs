@@ -103,8 +103,8 @@ fn audio_encode_loop(
 ) {
     loop {
         if let Ok(frame) = frame_rx.try_recv() {
-            if let Ok(mut buf) = codec.dequeue_input() {
-                let (ptr, cap) = buf.buffer();
+            if let Ok(buf) = codec.dequeue_input() {
+                let (ptr, cap): (*mut u8, usize) = buf.buffer();
                 let copy_len = frame.samples.len().min(cap);
                 unsafe {
                     std::ptr::copy_nonoverlapping(frame.samples.as_ptr(), ptr, copy_len);
@@ -116,11 +116,12 @@ fn audio_encode_loop(
         }
 
         while let Ok(out) = codec.dequeue_output() {
-            let info = out.info();
+            let out_buf: mediacodec::CodecOutputBuffer = out;
+            let info = out_buf.info();
             let is_key = BufferFlag::CodecConfig.is_contained_in(info.flags as i32);
             let ts = std::time::Duration::from_micros(info.presentation_time_us as u64);
 
-            let payload = if let Some(slice) = out.buffer_slice_pub() {
+            let payload = if let Some(slice) = out_buf.buffer_slice_pub() {
                 bytes::Bytes::copy_from_slice(slice)
             } else {
                 bytes::Bytes::new()

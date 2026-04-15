@@ -10,6 +10,7 @@ use crate::{
         Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoFrame, VideoPlanes,
     },
 };
+use mediacodec::{CodecInputBuffer, CodecOutputBuffer};
 
 pub struct AndroidVideoDecoderInput {
     tx: mpsc::UnboundedSender<EncodedVideoPacket>,
@@ -95,8 +96,8 @@ fn decode_loop(
 ) {
     loop {
         if let Ok(pkt) = pkt_rx.try_recv() {
-            if let Ok(mut buf) = codec.dequeue_input() {
-                let (ptr, cap) = buf.buffer();
+            if let Ok(buf) = codec.dequeue_input() {
+                let (ptr, cap): (*mut u8, usize) = buf.buffer();
                 let copy_len = pkt.payload.len().min(cap);
                 unsafe {
                     std::ptr::copy_nonoverlapping(pkt.payload.as_ptr(), ptr, copy_len);
@@ -111,9 +112,10 @@ fn decode_loop(
         }
 
         while let Ok(out) = codec.dequeue_output() {
-            let w = out.format().get_i32("width").unwrap_or(0) as u32;
-            let h = out.format().get_i32("height").unwrap_or(0) as u32;
-            let ts_us = out.info().presentation_time_us;
+            let out_buf: mediacodec::CodecOutputBuffer = out;
+            let w = out_buf.format().get_i32("width").unwrap_or(0) as u32;
+            let h = out_buf.format().get_i32("height").unwrap_or(0) as u32;
+            let ts_us = out_buf.info().presentation_time_us;
 
             let frame = VideoFrame {
                 dimensions: Dimensions::new(w, h),
@@ -131,9 +133,10 @@ fn decode_loop(
 
         if pkt_rx.is_closed() {
             while let Ok(out) = codec.dequeue_output() {
-                let w = out.format().get_i32("width").unwrap_or(0) as u32;
-                let h = out.format().get_i32("height").unwrap_or(0) as u32;
-                let ts_us = out.info().presentation_time_us;
+                let out_buf: mediacodec::CodecOutputBuffer = out;
+                let w = out_buf.format().get_i32("width").unwrap_or(0) as u32;
+                let h = out_buf.format().get_i32("height").unwrap_or(0) as u32;
+                let ts_us = out_buf.info().presentation_time_us;
                 let frame = VideoFrame {
                     dimensions: Dimensions::new(w, h),
                     format: PixelFormat::Nv12,

@@ -113,8 +113,8 @@ fn encode_loop(
 ) {
     loop {
         if let Ok((frame, _keyframe)) = frame_rx.try_recv() {
-            if let Ok(mut buf) = codec.dequeue_input() {
-                let (ptr, cap) = buf.buffer();
+            if let Ok(buf) = codec.dequeue_input() {
+                let (ptr, cap): (*mut u8, usize) = buf.buffer();
                 if let VideoPlanes::Cpu(data) = &frame.planes {
                     let copy_len = data.len().min(cap);
                     unsafe {
@@ -128,7 +128,8 @@ fn encode_loop(
         }
 
         while let Ok(out) = codec.dequeue_output() {
-            let info = out.info();
+            let out_buf: mediacodec::CodecOutputBuffer = out;
+            let info = out_buf.info();
             let is_key = BufferFlag::CodecConfig.is_contained_in(info.flags as i32)
                 || BufferFlag::Encode.is_contained_in(info.flags as i32);
             let ts = std::time::Duration::from_micros(info.presentation_time_us as u64);

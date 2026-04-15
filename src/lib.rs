@@ -1,6 +1,5 @@
 pub mod error;
 pub mod host;
-pub mod platform;
 pub mod traits;
 pub mod types;
 
@@ -15,3 +14,21 @@ pub use types::{
     EncodedAudioPacket, EncodedVideoPacket, PixelFormat, SampleFormat, Timestamp, VideoCodecId,
     VideoDecoderConfig, VideoEncoderConfig, VideoFrame, VideoPlanes,
 };
+
+#[cfg(target_arch = "wasm32")]
+pub mod platform {
+    pub mod wasm;
+    pub use wasm::video;
+}
+
+#[cfg(target_os = "android")]
+pub mod platform {
+    pub mod android;
+    pub use android::video;
+}
+
+#[cfg(all(target_os = "linux", feature = "linux"))]
+pub mod platform {
+    pub mod linux;
+    pub use linux::video;
+}
