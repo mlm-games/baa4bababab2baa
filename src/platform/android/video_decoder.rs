@@ -97,6 +97,7 @@ fn decode_loop(
     loop {
         if let Ok(pkt) = pkt_rx.try_recv() {
             if let Ok(buf) = codec.dequeue_input() {
+                let mut buf: mediacodec::CodecInputBuffer = buf;
                 let (ptr, cap): (*mut u8, usize) = buf.buffer();
                 let copy_len = pkt.payload.len().min(cap);
                 unsafe {

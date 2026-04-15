@@ -7,8 +7,7 @@ use crate::{
     error::Error,
     traits::{VideoEncoderInput, VideoEncoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, VideoDecoderConfig, VideoEncoderConfig, VideoFrame,
-        VideoPlanes,
+        EncodedVideoPacket, VideoDecoderConfig, VideoEncoderConfig, VideoFrame, VideoPlanes,
     },
 };
 
@@ -114,6 +113,7 @@ fn encode_loop(
     loop {
         if let Ok((frame, _keyframe)) = frame_rx.try_recv() {
             if let Ok(buf) = codec.dequeue_input() {
+                let mut buf: mediacodec::CodecInputBuffer = buf;
                 let (ptr, cap): (*mut u8, usize) = buf.buffer();
                 if let VideoPlanes::Cpu(data) = &frame.planes {
                     let copy_len = data.len().min(cap);
@@ -134,7 +134,7 @@ fn encode_loop(
                 || BufferFlag::Encode.is_contained_in(info.flags as i32);
             let ts = std::time::Duration::from_micros(info.presentation_time_us as u64);
 
-            let payload_bytes = if let Some(slice) = out.buffer_slice_pub() {
+            let payload_bytes = if let Some(slice) = out_buf.buffer_slice_pub() {
                 bytes::Bytes::copy_from_slice(slice)
             } else {
                 bytes::Bytes::new()

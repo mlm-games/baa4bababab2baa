@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::{
     error::Error,
     traits::{AudioEncoderInput, AudioEncoderOutput},
-    types::{AudioDecoderConfig, AudioEncoderConfig, AudioFrame, EncodedAudioPacket, SampleFormat},
+    types::{AudioDecoderConfig, AudioEncoderConfig, AudioFrame, EncodedAudioPacket},
 };
 
 pub struct AndroidAudioEncoderInput {
@@ -104,6 +104,7 @@ fn audio_encode_loop(
     loop {
         if let Ok(frame) = frame_rx.try_recv() {
             if let Ok(buf) = codec.dequeue_input() {
+                let mut buf: mediacodec::CodecInputBuffer = buf;
                 let (ptr, cap): (*mut u8, usize) = buf.buffer();
                 let copy_len = frame.samples.len().min(cap);
                 unsafe {

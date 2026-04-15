@@ -1,6 +1,8 @@
 use std::thread;
 
-use mediacodec::{CodecInputBuffer, CodecOutputBuffer, MediaCodec, MediaFormat, SampleFormat as McSampleFormat};
+use mediacodec::{
+    CodecInputBuffer, CodecOutputBuffer, MediaCodec, MediaFormat, SampleFormat as McSampleFormat,
+};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -88,7 +90,7 @@ fn audio_decode_loop(
     loop {
         if let Ok(pkt) = pkt_rx.try_recv() {
             if let Ok(buf) = codec.dequeue_input() {
-                let buf: CodecInputBuffer = buf;
+                let mut buf: CodecInputBuffer = buf;
                 let (ptr, cap) = buf.buffer();
                 let copy_len = pkt.payload.len().min(cap);
                 unsafe {
@@ -112,11 +114,13 @@ fn audio_decode_loop(
                 let audio_fmt = audio.format();
                 let (fmt_out, samples) = match audio_fmt {
                     McSampleFormat::S16(buf) => {
-                        let bytes: Vec<u8> = buf.iter().flat_map(|s| i16::to_le_bytes(s)).collect();
+                        let bytes: Vec<u8> =
+                            buf.iter().flat_map(|s| i16::to_le_bytes(*s)).collect();
                         (SampleFormat::S16, bytes)
                     }
                     McSampleFormat::F32(buf) => {
-                        let bytes: Vec<u8> = buf.iter().flat_map(|s| f32::to_le_bytes(s)).collect();
+                        let bytes: Vec<u8> =
+                            buf.iter().flat_map(|s| f32::to_le_bytes(*s)).collect();
                         (SampleFormat::F32, bytes)
                     }
                 };

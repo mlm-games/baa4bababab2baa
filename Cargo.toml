@@ -5,20 +5,27 @@ edition = "2024"
 
 [features]
 default = ["android"]
-web-codecs  = ["dep:web-codecs"]
-android     = ["dep:mediacodec"]
-linux       = ["dep:cros-codecs", "cros-codecs/vaapi"]
-apple       = []
+web-codecs = ["dep:web-codecs"]
+android = []
+linux = ["dep:cros-codecs", "cros-codecs/vaapi"]
+apple = []
 
 [dependencies]
 thiserror = "2"
-bytes     = "1"
-mediacodec = { version = "0.1", optional = true }
+bytes = "1"
 cros-codecs = { version = "0.0.5", optional = true, default-features = false, path = "../cros-codecs" }
 web-codecs = { version = "0.3", optional = true }
 
+[target.aarch64-linux-android.dependencies]
+mediacodec = { version = "0.1", path = "../rust_mediacodec" }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = [
+    "sync",
+    "rt-multi-thread",
+    "macros",
+    "time",
+] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
