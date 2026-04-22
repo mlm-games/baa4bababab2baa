@@ -68,12 +68,9 @@ impl AudioDecoderOutput for WasmAudioDecoderOutput {
 
         let mut channel_buf = vec![0.0f32; frames];
         for ch in 0..channels as usize {
+            channel_buf.clear();
             wc_frame
-                .copy_to(
-                    &mut channel_buf[..],
-                    ch,
-                    web_codecs::AudioCopyOptions::default(),
-                )
+                .append_to(&mut channel_buf, ch, web_codecs::AudioCopyOptions::default())
                 .map_err(|e| Error::Platform(format!("{e:?}")))?;
             for (i, s) in channel_buf.iter().enumerate() {
                 interleaved[i * channels as usize + ch] = *s;

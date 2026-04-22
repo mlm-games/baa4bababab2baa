@@ -80,16 +80,15 @@ fn build_wasm_frame(
     timestamp: crate::types::Timestamp,
 ) -> Result<web_codecs::VideoFrame, Error> {
     use js_sys::Uint8Array;
-    use wasm_bindgen::JsValue;
     use web_sys::{VideoFrame, VideoFrameBufferInit, VideoPixelFormat};
 
     let array = Uint8Array::from(data);
 
-    let init = VideoFrameBufferInit::new(
+    let init = VideoFrameBufferInit::new_with_f64(
         dims.height,
+        dims.width,
         VideoPixelFormat::Rgba,
         timestamp.as_micros() as f64,
-        dims.width,
     );
 
     VideoFrame::new_with_u8_array_and_video_frame_buffer_init(&array, &init)
