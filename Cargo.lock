@@ -272,6 +272,7 @@ dependencies = [
 [[package]]
 name = "cros-codecs"
 version = "0.0.5"
+source = "git+https://github.com/mlm-games/cros-codecs?branch=main#a5dc00f9d2aefb33fcfa7d505e0e0c23145044cc"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -581,6 +582,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 [[package]]
 name = "mediacodec"
 version = "0.1.4"
+source = "git+https://github.com/mlm-games/rust_mediacodec?branch=main#55ad2ae68c51fede06278e8c4f7d121ccdc58d1f"
 dependencies = [
  "android_logger",
  "jni",
