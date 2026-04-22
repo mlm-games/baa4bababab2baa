@@ -288,6 +288,7 @@ dependencies = [
 [[package]]
 name = "cros-libva"
 version = "0.0.13"
+source = "git+https://github.com/mlm-games/cros-libva?branch=main#1bd9482c158adfd5a70647deb97a79923935ff4a"
 dependencies = [
  "bindgen",
  "bitflags",
