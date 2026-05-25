@@ -101,8 +101,14 @@ fn audio_encode_loop(
     pkt_tx: mpsc::UnboundedSender<Result<EncodedAudioPacket, Error>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) {
+    let mut pending: std::collections::VecDeque<AudioFrame> = std::collections::VecDeque::new();
+
     loop {
-        if let Ok(frame) = frame_rx.try_recv() {
+        while let Ok(frame) = frame_rx.try_recv() {
+            pending.push_back(frame);
+        }
+
+        while let Some(frame) = pending.pop_front() {
             if let Ok(buf) = codec.dequeue_input() {
                 let mut buf: mediacodec::CodecInputBuffer = buf;
                 let (ptr, cap): (*mut u8, usize) = buf.buffer();
@@ -113,6 +119,9 @@ fn audio_encode_loop(
                 buf.set_write_size(copy_len);
                 buf.set_time(frame.timestamp.as_micros() as u64);
                 queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                pending.push_front(frame);
+                break;
             }
         }
 
@@ -140,7 +149,7 @@ fn audio_encode_loop(
         }
 
         thread::sleep(std::time::Duration::from_micros(100));
-        if frame_rx.is_closed() {
+        if frame_rx.is_closed() && pending.is_empty() {
             return;
         }
     }

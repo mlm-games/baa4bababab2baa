@@ -50,7 +50,7 @@ fn build_audio_data(frame: &AudioFrame) -> Result<AudioData, Error> {
     let channels = frame.channels as usize;
     match frame.format {
         SampleFormat::F32 => {
-            let samples: &[f32] = bytemuck_cast_f32(&frame.samples);
+            let samples: Vec<f32> = cast_f32_slice(&frame.samples);
             let frames = samples.len() / channels;
             let mut planar: Vec<Vec<f32>> = vec![Vec::with_capacity(frames); channels];
             for (i, s) in samples.iter().enumerate() {
@@ -61,7 +61,7 @@ fn build_audio_data(frame: &AudioFrame) -> Result<AudioData, Error> {
                 .map_err(|e| Error::Platform(format!("{e:?}")))
         }
         SampleFormat::S16 => {
-            let raw: &[i16] = bytemuck_cast_i16(&frame.samples);
+            let raw: Vec<i16> = cast_i16_slice(&frame.samples);
             let f32s: Vec<f32> = raw.iter().map(|s| *s as f32 / 32768.0).collect();
             let frames = f32s.len() / channels;
             let mut planar: Vec<Vec<f32>> = vec![Vec::with_capacity(frames); channels];
@@ -75,16 +75,18 @@ fn build_audio_data(frame: &AudioFrame) -> Result<AudioData, Error> {
     }
 }
 
-fn bytemuck_cast_f32(bytes: &[u8]) -> &[f32] {
-    let (head, body, tail) = unsafe { bytes.align_to::<f32>() };
-    assert!(head.is_empty() && tail.is_empty(), "misaligned f32 buffer");
-    body
+fn cast_f32_slice(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
-fn bytemuck_cast_i16(bytes: &[u8]) -> &[i16] {
-    let (head, body, tail) = unsafe { bytes.align_to::<i16>() };
-    assert!(head.is_empty() && tail.is_empty(), "misaligned i16 buffer");
-    body
+fn cast_i16_slice(bytes: &[u8]) -> Vec<i16> {
+    bytes
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect()
 }
 
 pub struct WasmAudioEncoderOutput {

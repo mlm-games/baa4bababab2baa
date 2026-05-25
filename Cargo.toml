@@ -7,7 +7,7 @@ edition = "2024"
 default = ["android"]
 web-codecs = ["dep:web-codecs"]
 android = []
-linux = ["dep:cros-codecs", "cros-codecs/vaapi"]
+linux = ["dep:cros-codecs", "cros-codecs/vaapi", "cros-codecs/h265", "cros-codecs/av1", "cros-codecs/gbm"]
 apple = []
 
 [dependencies]

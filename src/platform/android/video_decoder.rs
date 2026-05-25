@@ -88,14 +88,43 @@ pub fn create(
     ))
 }
 
+fn drain_output(codec: &mut MediaCodec, frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>) {
+    while let Ok(out) = codec.dequeue_output() {
+        let out_buf: mediacodec::CodecOutputBuffer = out;
+        let w = out_buf.format().get_i32("width").unwrap_or(0) as u32;
+        let h = out_buf.format().get_i32("height").unwrap_or(0) as u32;
+        let ts_us = out_buf.info().presentation_time_us;
+        let data = out_buf
+            .buffer_slice_pub()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+        let frame = VideoFrame {
+            dimensions: Dimensions::new(w, h),
+            format: PixelFormat::Nv12,
+            timestamp: std::time::Duration::from_micros(ts_us as u64),
+            planes: VideoPlanes::Cpu(data),
+        };
+        if frame_tx.send(Ok(frame)).is_err() {
+            return;
+        }
+    }
+}
+
 fn decode_loop(
     mut codec: MediaCodec,
     mut pkt_rx: mpsc::UnboundedReceiver<EncodedVideoPacket>,
     frame_tx: mpsc::UnboundedSender<Result<VideoFrame, Error>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) {
+    let mut pending: std::collections::VecDeque<EncodedVideoPacket> =
+        std::collections::VecDeque::new();
+
     loop {
-        if let Ok(pkt) = pkt_rx.try_recv() {
+        while let Ok(pkt) = pkt_rx.try_recv() {
+            pending.push_back(pkt);
+        }
+
+        while let Some(pkt) = pending.pop_front() {
             if let Ok(buf) = codec.dequeue_input() {
                 let mut buf: mediacodec::CodecInputBuffer = buf;
                 let (ptr, cap): (*mut u8, usize) = buf.buffer();
@@ -109,50 +138,18 @@ fn decode_loop(
                     buf.set_flags(mediacodec::BufferFlag::CodecConfig as u32);
                 }
                 queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                pending.push_front(pkt);
+                break;
             }
         }
 
-        while let Ok(out) = codec.dequeue_output() {
-            let out_buf: mediacodec::CodecOutputBuffer = out;
-            let w = out_buf.format().get_i32("width").unwrap_or(0) as u32;
-            let h = out_buf.format().get_i32("height").unwrap_or(0) as u32;
-            let ts_us = out_buf.info().presentation_time_us;
-
-            let data = out_buf.buffer_slice_pub()
-                .map(|s| s.to_vec())
-                .unwrap_or_default();
-
-            let frame = VideoFrame {
-                dimensions: Dimensions::new(w, h),
-                format: PixelFormat::Nv12,
-                timestamp: std::time::Duration::from_micros(ts_us as u64),
-                planes: VideoPlanes::Cpu(data),
-            };
-
-            if frame_tx.send(Ok(frame)).is_err() {
-                return;
-            }
-        }
+        drain_output(&mut codec, &frame_tx);
 
         thread::sleep(std::time::Duration::from_micros(100));
 
-        if pkt_rx.is_closed() {
-            while let Ok(out) = codec.dequeue_output() {
-                let out_buf: mediacodec::CodecOutputBuffer = out;
-                let w = out_buf.format().get_i32("width").unwrap_or(0) as u32;
-                let h = out_buf.format().get_i32("height").unwrap_or(0) as u32;
-                let ts_us = out_buf.info().presentation_time_us;
-                let data = out_buf.buffer_slice_pub()
-                    .map(|s| s.to_vec())
-                    .unwrap_or_default();
-                let frame = VideoFrame {
-                    dimensions: Dimensions::new(w, h),
-                    format: PixelFormat::Nv12,
-                    timestamp: std::time::Duration::from_micros(ts_us as u64),
-                    planes: VideoPlanes::Cpu(data),
-                };
-                let _ = frame_tx.send(Ok(frame));
-            }
+        if pkt_rx.is_closed() && pending.is_empty() {
+            drain_output(&mut codec, &frame_tx);
             return;
         }
     }

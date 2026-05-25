@@ -3,7 +3,7 @@ use baabaabaabaabababbababbaa::{
 };
 
 fn main() {
-    let host = default_host();
+    let _host = default_host();
 
     println!("xcodec: host initialised");
 

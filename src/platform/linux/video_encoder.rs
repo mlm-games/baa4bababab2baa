@@ -27,7 +27,6 @@ use cros_codecs::{
     decoder::FramePool,
     encoder::{self, VideoEncoder as CcVideoEncoder},
     libva as va,
-    video_frame::VideoFrame,
 };
 
 const VA_FOURCC_NV12: u32 = 0x3231564E;
@@ -35,12 +34,6 @@ const VA_RT_FORMAT_YUV420: u32 = 0x00000001;
 
 use va::{Display, Image, Surface, UsageHint, VAImageFormat};
 
-use cros_codecs::video_frame::frame_pool::PooledVideoFrame;
-
-use cros_codecs::libva::{
-    Display, Image, Surface, UsageHint, VAImageFormat,
-    constants::{VA_FOURCC_NV12, VA_RT_FORMAT_YUV420},
-};
 
 enum Cmd {
     Encode(VideoFrame, Option<bool>),

@@ -22,6 +22,7 @@ use cros_codecs::{
     decoder::stateless::{av1::Av1, h264::H264, h265::H265, vp8::Vp8, vp9::Vp9},
     decoder::{DecodedHandle, DecoderEvent, StreamInfo},
     image_processing::nv12_to_i420,
+    libva,
     utils::align_up,
     video_frame::{
         UV_PLANE, VideoFrame as CcVideoFrame, Y_PLANE,

@@ -110,8 +110,15 @@ fn encode_loop(
     pkt_tx: mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) {
+    let mut pending: std::collections::VecDeque<(VideoFrame, Option<bool>)> =
+        std::collections::VecDeque::new();
+
     loop {
-        if let Ok((frame, _keyframe)) = frame_rx.try_recv() {
+        while let Ok(item) = frame_rx.try_recv() {
+            pending.push_back(item);
+        }
+
+        while let Some((frame, keyframe)) = pending.pop_front() {
             if let Ok(buf) = codec.dequeue_input() {
                 let mut buf: mediacodec::CodecInputBuffer = buf;
                 let (ptr, cap): (*mut u8, usize) = buf.buffer();
@@ -123,7 +130,13 @@ fn encode_loop(
                     buf.set_write_size(copy_len);
                 }
                 buf.set_time(frame.timestamp.as_micros() as u64);
+                if keyframe.unwrap_or(false) {
+                    buf.set_flags(mediacodec::BufferFlag::CodecConfig as u32);
+                }
                 queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                pending.push_front((frame, keyframe));
+                break;
             }
         }
 
@@ -153,7 +166,7 @@ fn encode_loop(
 
         thread::sleep(std::time::Duration::from_micros(100));
 
-        if frame_rx.is_closed() {
+        if frame_rx.is_closed() && pending.is_empty() {
             return;
         }
     }

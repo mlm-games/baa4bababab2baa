@@ -87,8 +87,15 @@ fn audio_decode_loop(
     frame_tx: mpsc::UnboundedSender<Result<AudioFrame, Error>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) {
+    let mut pending: std::collections::VecDeque<EncodedAudioPacket> =
+        std::collections::VecDeque::new();
+
     loop {
-        if let Ok(pkt) = pkt_rx.try_recv() {
+        while let Ok(pkt) = pkt_rx.try_recv() {
+            pending.push_back(pkt);
+        }
+
+        while let Some(pkt) = pending.pop_front() {
             if let Ok(buf) = codec.dequeue_input() {
                 let mut buf: CodecInputBuffer = buf;
                 let (ptr, cap) = buf.buffer();
@@ -99,16 +106,19 @@ fn audio_decode_loop(
                 buf.set_write_size(copy_len);
                 buf.set_time(pkt.timestamp.as_micros() as u64);
                 queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                pending.push_front(pkt);
+                break;
             }
         }
 
-        let out: Result<CodecOutputBuffer, _> = codec.dequeue_output();
-        if let Ok(out_buf) = out {
+        while let Ok(out_buf) = codec.dequeue_output() {
             let out_buf: CodecOutputBuffer = out_buf;
             let fmt = out_buf.format();
             let channels = fmt.get_i32("channel-count").unwrap_or(2) as u32;
             let sample_rate = fmt.get_i32("sample-rate").unwrap_or(48_000) as u32;
-            let ts = std::time::Duration::from_micros(out_buf.info().presentation_time_us as u64);
+            let ts =
+                std::time::Duration::from_micros(out_buf.info().presentation_time_us as u64);
 
             if let Some(mediacodec::Frame::Audio(audio)) = out_buf.frame() {
                 let audio_fmt = audio.format();
@@ -140,7 +150,7 @@ fn audio_decode_loop(
         }
 
         thread::sleep(std::time::Duration::from_micros(100));
-        if pkt_rx.is_closed() {
+        if pkt_rx.is_closed() && pending.is_empty() {
             return;
         }
     }
