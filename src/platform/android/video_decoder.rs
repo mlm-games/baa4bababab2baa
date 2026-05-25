@@ -118,11 +118,15 @@ fn decode_loop(
             let h = out_buf.format().get_i32("height").unwrap_or(0) as u32;
             let ts_us = out_buf.info().presentation_time_us;
 
+            let data = out_buf.buffer_slice_pub()
+                .map(|s| s.to_vec())
+                .unwrap_or_default();
+
             let frame = VideoFrame {
                 dimensions: Dimensions::new(w, h),
                 format: PixelFormat::Nv12,
                 timestamp: std::time::Duration::from_micros(ts_us as u64),
-                planes: VideoPlanes::Hardware,
+                planes: VideoPlanes::Cpu(data),
             };
 
             if frame_tx.send(Ok(frame)).is_err() {
@@ -138,11 +142,14 @@ fn decode_loop(
                 let w = out_buf.format().get_i32("width").unwrap_or(0) as u32;
                 let h = out_buf.format().get_i32("height").unwrap_or(0) as u32;
                 let ts_us = out_buf.info().presentation_time_us;
+                let data = out_buf.buffer_slice_pub()
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default();
                 let frame = VideoFrame {
                     dimensions: Dimensions::new(w, h),
                     format: PixelFormat::Nv12,
                     timestamp: std::time::Duration::from_micros(ts_us as u64),
-                    planes: VideoPlanes::Hardware,
+                    planes: VideoPlanes::Cpu(data),
                 };
                 let _ = frame_tx.send(Ok(frame));
             }
