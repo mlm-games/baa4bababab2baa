@@ -10,7 +10,7 @@ use crate::{
     },
 };
 
-fn to_wc_config(cfg: &VideoDecoderConfig) -> WcVideoDecoderConfig {
+pub(super) fn to_wc_config(cfg: &VideoDecoderConfig) -> WcVideoDecoderConfig {
     let mut wc = WcVideoDecoderConfig::new(&cfg.codec.0);
 
     if let Some(res) = cfg.resolution {
@@ -29,12 +29,27 @@ fn to_wc_config(cfg: &VideoDecoderConfig) -> WcVideoDecoderConfig {
     wc
 }
 
+fn to_our_pixel_format(fmt: web_sys::VideoPixelFormat) -> PixelFormat {
+    use web_sys::VideoPixelFormat;
+    match fmt {
+        VideoPixelFormat::I420 | VideoPixelFormat::I420a => PixelFormat::Yuv420p,
+        VideoPixelFormat::Nv12 => PixelFormat::Nv12,
+        VideoPixelFormat::Rgba => PixelFormat::Rgba8,
+        VideoPixelFormat::Bgra => PixelFormat::Bgra8,
+        _ => PixelFormat::Nv12,
+    }
+}
+
 fn to_our_frame(f: web_codecs::VideoFrame) -> VideoFrame {
     let dims = f.dimensions();
     let ts = f.timestamp();
+    let fmt = f
+        .format()
+        .map(to_our_pixel_format)
+        .unwrap_or(PixelFormat::Nv12);
     VideoFrame {
         dimensions: Dimensions::new(dims.width, dims.height),
-        format: PixelFormat::Nv12,
+        format: fmt,
         timestamp: ts,
         planes: VideoPlanes::Hardware,
     }
@@ -98,6 +113,4 @@ pub fn create(
     ))
 }
 
-pub(super) fn to_wc_config_pub(config: &VideoDecoderConfig) -> WcVideoDecoderConfig {
-    to_wc_config(config)
-}
+

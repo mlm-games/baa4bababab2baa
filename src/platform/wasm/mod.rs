@@ -52,9 +52,8 @@ impl WebCodecsHost {
         &self,
         config: &VideoEncoderConfig,
     ) -> Result<bool, Error> {
-        use web_codecs::VideoEncoderConfig as WcCfg;
-        let wc = video_encoder::to_wc_config_pub(config);
-        wc.is_supported()
+        video_encoder::to_wc_config(config)
+            .is_supported()
             .await
             .map_err(|e| Error::Platform(format!("{e:?}")))
     }
@@ -63,8 +62,8 @@ impl WebCodecsHost {
         &self,
         config: &VideoDecoderConfig,
     ) -> Result<bool, Error> {
-        let wc = video_decoder::to_wc_config_pub(config);
-        wc.is_supported()
+        video_decoder::to_wc_config(config)
+            .is_supported()
             .await
             .map_err(|e| Error::Platform(format!("{e:?}")))
     }
@@ -73,8 +72,8 @@ impl WebCodecsHost {
         &self,
         config: &AudioEncoderConfig,
     ) -> Result<bool, Error> {
-        let wc = audio_encoder::to_wc_config_pub(config);
-        wc.is_supported()
+        audio_encoder::to_wc_config(config)
+            .is_supported()
             .await
             .map_err(|e| Error::Platform(format!("{e:?}")))
     }
@@ -83,8 +82,8 @@ impl WebCodecsHost {
         &self,
         config: &AudioDecoderConfig,
     ) -> Result<bool, Error> {
-        let wc = audio_decoder::to_wc_config_pub(config);
-        wc.is_supported()
+        audio_decoder::to_wc_config(config)
+            .is_supported()
             .await
             .map_err(|e| Error::Platform(format!("{e:?}")))
     }

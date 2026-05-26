@@ -8,7 +8,7 @@ use crate::{
     types::{AudioDecoderConfig, AudioEncoderConfig, AudioFrame, EncodedAudioPacket, SampleFormat},
 };
 
-fn to_wc_config(cfg: &AudioEncoderConfig) -> WcAudioEncoderConfig {
+pub(super) fn to_wc_config(cfg: &AudioEncoderConfig) -> WcAudioEncoderConfig {
     WcAudioEncoderConfig {
         codec: cfg.codec.0.clone(),
         channel_count: Some(cfg.channels),
@@ -50,43 +50,30 @@ fn build_audio_data(frame: &AudioFrame) -> Result<AudioData, Error> {
     let channels = frame.channels as usize;
     match frame.format {
         SampleFormat::F32 => {
-            let samples: Vec<f32> = cast_f32_slice(&frame.samples);
-            let frames = samples.len() / channels;
+            let total = frame.samples.len() / 4;
+            let frames = total / channels;
             let mut planar: Vec<Vec<f32>> = vec![Vec::with_capacity(frames); channels];
-            for (i, s) in samples.iter().enumerate() {
-                planar[i % channels].push(*s);
+            for (i, chunk) in frame.samples.chunks_exact(4).enumerate() {
+                let s = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                planar[i % channels].push(s);
             }
             let refs: Vec<&[f32]> = planar.iter().map(|v| v.as_slice()).collect();
             AudioData::new(refs.into_iter(), frame.sample_rate, frame.timestamp)
                 .map_err(|e| Error::Platform(format!("{e:?}")))
         }
         SampleFormat::S16 => {
-            let raw: Vec<i16> = cast_i16_slice(&frame.samples);
-            let f32s: Vec<f32> = raw.iter().map(|s| *s as f32 / 32768.0).collect();
-            let frames = f32s.len() / channels;
+            let total = frame.samples.len() / 2;
+            let frames = total / channels;
             let mut planar: Vec<Vec<f32>> = vec![Vec::with_capacity(frames); channels];
-            for (i, s) in f32s.iter().enumerate() {
-                planar[i % channels].push(*s);
+            for (i, chunk) in frame.samples.chunks_exact(2).enumerate() {
+                let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+                planar[i % channels].push(s as f32 / 32768.0);
             }
             let refs: Vec<&[f32]> = planar.iter().map(|v| v.as_slice()).collect();
             AudioData::new(refs.into_iter(), frame.sample_rate, frame.timestamp)
                 .map_err(|e| Error::Platform(format!("{e:?}")))
         }
     }
-}
-
-fn cast_f32_slice(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
-}
-
-fn cast_i16_slice(bytes: &[u8]) -> Vec<i16> {
-    bytes
-        .chunks_exact(2)
-        .map(|c| i16::from_le_bytes([c[0], c[1]]))
-        .collect()
 }
 
 pub struct WasmAudioEncoderOutput {
@@ -138,6 +125,4 @@ pub fn create(
     ))
 }
 
-pub(super) fn to_wc_config_pub(config: &AudioEncoderConfig) -> WcAudioEncoderConfig {
-    to_wc_config(config)
-}
+

@@ -12,7 +12,7 @@ use crate::{
     },
 };
 
-fn to_wc_config(cfg: &VideoEncoderConfig) -> WcVideoEncoderConfig {
+pub(super) fn to_wc_config(cfg: &VideoEncoderConfig) -> WcVideoEncoderConfig {
     let mut wc = WcVideoEncoderConfig::new(
         &cfg.codec.0,
         WcDimensions::new(cfg.dimensions.width, cfg.dimensions.height),
@@ -148,6 +148,4 @@ pub fn create(
     ))
 }
 
-pub(super) fn to_wc_config_pub(config: &VideoEncoderConfig) -> WcVideoEncoderConfig {
-    to_wc_config(config)
-}
+
