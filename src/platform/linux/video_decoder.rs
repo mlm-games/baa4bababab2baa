@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     path::PathBuf,
     sync::Arc,
     sync::atomic::{AtomicU32, Ordering},
@@ -18,7 +19,7 @@ use crate::{
 
 use cros_codecs::{
     BlockingMode, EncodedFormat, Fourcc,
-    decoder::stateless::{DecodeError, StatelessDecoder, StatelessVideoDecoder},
+    decoder::stateless::{DecodeError, DynStatelessVideoDecoder, StatelessDecoder, StatelessVideoDecoder},
     decoder::stateless::{av1::Av1, h264::H264, h265::H265, vp8::Vp8, vp9::Vp9},
     decoder::{DecodedHandle, DecoderEvent, StreamInfo},
     image_processing::nv12_to_i420,
@@ -26,7 +27,6 @@ use cros_codecs::{
     utils::align_up,
     video_frame::{
         UV_PLANE, VideoFrame as CcVideoFrame, Y_PLANE,
-        frame_pool::FramePool,
         gbm_video_frame::{GbmDevice, GbmUsage},
         generic_dma_video_frame::GenericDmaVideoFrame,
     },
@@ -76,14 +76,15 @@ impl VideoDecoderOutput for CrosVideoDecoderOutput {
 }
 
 pub fn create(
-    _config: VideoDecoderConfig,
+    config: VideoDecoderConfig,
 ) -> Result<(CrosVideoDecoderInput, CrosVideoDecoderOutput), Error> {
+    let codec_string = config.codec.0;
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd>();
     let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Result<VideoFrame, Error>>();
     let queue = Arc::new(AtomicU32::new(0));
 
     let queue2 = queue.clone();
-    thread::spawn(move || worker_loop(cmd_rx, frame_tx, queue2));
+    thread::spawn(move || worker_loop(cmd_rx, frame_tx, queue2, codec_string));
 
     Ok((
         CrosVideoDecoderInput { tx: cmd_tx, queue },
@@ -91,115 +92,91 @@ pub fn create(
     ))
 }
 
+fn make_decoder(
+    fmt: EncodedFormat,
+) -> Result<DynStatelessVideoDecoder<GenericDmaVideoFrame>, String> {
+    match fmt {
+        EncodedFormat::H264 => Ok(StatelessDecoder::<H264, _>::new_vaapi(
+            libva::Display::open()
+                .ok_or("failed to open libva display")?,
+            BlockingMode::NonBlocking,
+        )
+        .map_err(|_| "failed to create H264 decoder")?
+        .into_trait_object()),
+        EncodedFormat::H265 => Ok(StatelessDecoder::<H265, _>::new_vaapi(
+            libva::Display::open()
+                .ok_or("failed to open libva display")?,
+            BlockingMode::NonBlocking,
+        )
+        .map_err(|_| "failed to create H265 decoder")?
+        .into_trait_object()),
+        EncodedFormat::VP8 => Ok(StatelessDecoder::<Vp8, _>::new_vaapi(
+            libva::Display::open()
+                .ok_or("failed to open libva display")?,
+            BlockingMode::NonBlocking,
+        )
+        .map_err(|_| "failed to create VP8 decoder")?
+        .into_trait_object()),
+        EncodedFormat::VP9 => Ok(StatelessDecoder::<Vp9, _>::new_vaapi(
+            libva::Display::open()
+                .ok_or("failed to open libva display")?,
+            BlockingMode::NonBlocking,
+        )
+        .map_err(|_| "failed to create VP9 decoder")?
+        .into_trait_object()),
+        EncodedFormat::AV1 => Ok(StatelessDecoder::<Av1, _>::new_vaapi(
+            libva::Display::open()
+                .ok_or("failed to open libva display")?,
+            BlockingMode::NonBlocking,
+        )
+        .map_err(|_| "failed to create AV1 decoder")?
+        .into_trait_object()),
+    }
+}
+
 fn worker_loop(
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     frame_tx: mpsc::UnboundedSender<Result<VideoFrame, Error>>,
     queue: Arc<AtomicU32>,
+    codec_string: String,
 ) {
     let gbm = Arc::new(
         GbmDevice::open(PathBuf::from("/dev/dri/renderD128"))
             .expect("Could not open GBM device (/dev/dri/renderD128)"),
     );
 
-    let mut pool = FramePool::new({
-        let gbm = gbm.clone();
-        move |stream_info: &StreamInfo| {
-            gbm.new_frame(
-                Fourcc::from(b"NV12"),
-                stream_info.display_resolution,
-                stream_info.coded_resolution,
-                GbmUsage::Decode,
-            )
-            .expect("GBM new_frame failed")
+    let frame_queue: RefCell<Vec<GenericDmaVideoFrame>> = RefCell::new(Vec::new());
+
+    let gbm2 = Arc::clone(&gbm);
+    let mut alloc_frame = move |stream_info: &StreamInfo| -> GenericDmaVideoFrame {
+        let gbm_frame = GbmDevice::new_frame(
+            Arc::clone(&gbm2),
+            Fourcc::from(b"NV12"),
+            stream_info.display_resolution,
+            stream_info.coded_resolution,
+            GbmUsage::Decode,
+        )
+        .expect("GBM new_frame failed");
+        gbm_frame
             .to_generic_dma_video_frame()
             .expect("GBM->DMA export failed")
-        }
-    });
-
-    let mut alloc = || pool.alloc();
-
-    let mut decoder_h264 = None::<cros_codecs::decoder::stateless::DynStatelessVideoDecoder<_>>;
-    let mut decoder_h265 = None::<cros_codecs::decoder::stateless::DynStatelessVideoDecoder<_>>;
-    let mut decoder_vp8 = None::<cros_codecs::decoder::stateless::DynStatelessVideoDecoder<_>>;
-    let mut decoder_vp9 = None::<cros_codecs::decoder::stateless::DynStatelessVideoDecoder<_>>;
-    let mut decoder_av1 = None::<cros_codecs::decoder::stateless::DynStatelessVideoDecoder<_>>;
-
-    let mut get_decoder = |codec: &str| -> Result<
-        &mut cros_codecs::decoder::stateless::DynStatelessVideoDecoder<_>,
-        String,
-    > {
-        let mk = |fmt: EncodedFormat| -> Result<
-            cros_codecs::decoder::stateless::DynStatelessVideoDecoder<_>,
-            String,
-        > {
-            match fmt {
-                EncodedFormat::H264 => StatelessDecoder::<H264, _>::new_vaapi(
-                    libva::Display::open()
-                        .ok_or("failed to open libva display")?
-                        .into(),
-                    BlockingMode::NonBlocking,
-                )
-                .map_err(|_| "failed to create H264 decoder")?
-                .into_trait_object()
-                .into(),
-                EncodedFormat::H265 => StatelessDecoder::<H265, _>::new_vaapi(
-                    libva::Display::open()
-                        .ok_or("failed to open libva display")?
-                        .into(),
-                    BlockingMode::NonBlocking,
-                )
-                .map_err(|_| "failed to create H265 decoder")?
-                .into_trait_object()
-                .into(),
-                EncodedFormat::VP8 => StatelessDecoder::<Vp8, _>::new_vaapi(
-                    libva::Display::open()
-                        .ok_or("failed to open libva display")?
-                        .into(),
-                    BlockingMode::NonBlocking,
-                )
-                .map_err(|_| "failed to create VP8 decoder")?
-                .into_trait_object()
-                .into(),
-                EncodedFormat::VP9 => StatelessDecoder::<Vp9, _>::new_vaapi(
-                    libva::Display::open()
-                        .ok_or("failed to open libva display")?
-                        .into(),
-                    BlockingMode::NonBlocking,
-                )
-                .map_err(|_| "failed to create VP9 decoder")?
-                .into_trait_object()
-                .into(),
-                EncodedFormat::AV1 => StatelessDecoder::<Av1, _>::new_vaapi(
-                    libva::Display::open()
-                        .ok_or("failed to open libva display")?
-                        .into(),
-                    BlockingMode::NonBlocking,
-                )
-                .map_err(|_| "failed to create AV1 decoder")?
-                .into_trait_object()
-                .into(),
-            }
-        };
-
-        let fmt = match codec {
-            "video/avc" | "video/h264" => EncodedFormat::H264,
-            "video/hevc" | "video/h265" => EncodedFormat::H265,
-            "video/vp8" => EncodedFormat::VP8,
-            "video/vp9" => EncodedFormat::VP9,
-            "video/av01" | "video/av1" => EncodedFormat::AV1,
-            _ => return Err(format!("unsupported codec string: {codec}")),
-        };
-
-        Ok(match fmt {
-            EncodedFormat::H264 => decoder_h264.get_or_insert(mk(fmt)?),
-            EncodedFormat::H265 => decoder_h265.get_or_insert(mk(fmt)?),
-            EncodedFormat::VP8 => decoder_vp8.get_or_insert(mk(fmt)?),
-            EncodedFormat::VP9 => decoder_vp9.get_or_insert(mk(fmt)?),
-            EncodedFormat::AV1 => decoder_av1.get_or_insert(mk(fmt)?),
-        })
     };
 
-    let codec_string = "video/avc";
+    let mut alloc = || frame_queue.borrow_mut().pop();
+
+    let decoder: RefCell<Option<DynStatelessVideoDecoder<GenericDmaVideoFrame>>> =
+        RefCell::new(None);
+
+    fn codec_to_fmt(codec: &str) -> Result<EncodedFormat, String> {
+        match codec {
+            "video/avc" | "video/h264" => Ok(EncodedFormat::H264),
+            "video/hevc" | "video/h265" => Ok(EncodedFormat::H265),
+            "video/vp8" => Ok(EncodedFormat::VP8),
+            "video/vp9" => Ok(EncodedFormat::VP9),
+            "video/av01" | "video/av1" => Ok(EncodedFormat::AV1),
+            _ => Err(format!("unsupported codec string: {codec}")),
+        }
+    }
 
     loop {
         let Some(cmd) = cmd_rx.blocking_recv() else {
@@ -210,10 +187,12 @@ fn worker_loop(
             Cmd::Close => return,
 
             Cmd::Flush(done) => {
-                let res = (|| {
-                    let dec = get_decoder(codec_string).map_err(Error::Platform)?;
-                    dec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
-                    drain_events(dec, &mut pool, &frame_tx)?;
+                let res = (|| -> Result<(), Error> {
+                    let mut dec = decoder.borrow_mut();
+                    if let Some(dec) = dec.as_mut() {
+                        dec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
+                        drain_events(dec, &frame_queue, &frame_tx, &mut alloc_frame)?;
+                    }
                     Ok(())
                 })();
                 let _ = done.send(res);
@@ -222,8 +201,14 @@ fn worker_loop(
             Cmd::Packet(pkt) => {
                 queue.fetch_sub(1, Ordering::Relaxed);
 
-                let res = (|| {
-                    let dec = get_decoder(codec_string).map_err(Error::Platform)?;
+                let res = (|| -> Result<(), Error> {
+                    let fmt = codec_to_fmt(&codec_string)?;
+
+                    let mut dec_borrow = decoder.borrow_mut();
+                    if dec_borrow.is_none() {
+                        *dec_borrow = Some(make_decoder(fmt)?);
+                    }
+                    let dec = dec_borrow.as_mut().unwrap();
 
                     let mut remaining = pkt.payload.as_ref();
                     let ts_us = pkt.timestamp.as_micros() as u64;
@@ -234,11 +219,11 @@ fn worker_loop(
                             Err(
                                 DecodeError::NotEnoughOutputBuffers(_) | DecodeError::CheckEvents,
                             ) => {
-                                drain_events(dec, &mut pool, &frame_tx)?;
+                                drain_events(dec, &frame_queue, &frame_tx, &mut alloc_frame)?;
                             }
                             Err(e) => return Err(Error::Platform(format!("{e:?}"))),
                         }
-                        drain_events(dec, &mut pool, &frame_tx)?;
+                        drain_events(dec, &frame_queue, &frame_tx, &mut alloc_frame)?;
                     }
 
                     Ok(())
@@ -254,18 +239,23 @@ fn worker_loop(
 }
 
 fn drain_events<F: CcVideoFrame + 'static>(
-    dec: &mut dyn StatelessVideoDecoder<Handle = Box<dyn DecodedHandle<Frame = F>>>,
-    pool: &mut FramePool<GenericDmaVideoFrame>,
+    dec: &mut DynStatelessVideoDecoder<F>,
+    frame_queue: &RefCell<Vec<GenericDmaVideoFrame>>,
     frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
+    alloc_frame: &mut dyn FnMut(&StreamInfo) -> GenericDmaVideoFrame,
 ) -> Result<(), Error> {
     while let Some(ev) = dec.next_event() {
         match ev {
             DecoderEvent::FormatChanged => {
                 if let Some(info) = dec.stream_info() {
-                    pool.resize(info);
+                    let n = frame_queue.borrow().len();
+                    for _ in n..info.min_num_frames {
+                        frame_queue.borrow_mut().push(alloc_frame(info));
+                    }
                 }
             }
-            DecoderEvent::FrameReady(handle) => {
+            DecoderEvent::FrameReady(h) => {
+                let handle: &dyn DecodedHandle<Frame = F> = &*h;
                 handle
                     .sync()
                     .map_err(|e| Error::Platform(format!("{e:?}")))?;

@@ -13,6 +13,7 @@ pub struct VideoEncoderConfig {
     pub framerate: Option<f64>,
     pub hardware_acceleration: Option<bool>,
     pub latency_optimized: Option<bool>,
+    pub level: Option<u32>,
 }
 
 impl Default for VideoEncoderConfig {
@@ -24,6 +25,7 @@ impl Default for VideoEncoderConfig {
             framerate: None,
             hardware_acceleration: None,
             latency_optimized: None,
+            level: None,
         }
     }
 }

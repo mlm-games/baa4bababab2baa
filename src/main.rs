@@ -19,6 +19,7 @@ fn main() {
         dimensions: Dimensions::new(1920, 1080),
         bitrate: Some(4_000_000),
         framerate: Some(30.0),
+        level: None,
         hardware_acceleration: None,
         latency_optimized: None,
     };

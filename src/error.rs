@@ -13,3 +13,9 @@ pub enum Error {
     #[error("no backend available for this platform")]
     NoBackend,
 }
+
+impl From<String> for Error {
+    fn from(s: String) -> Self {
+        Error::Platform(s)
+    }
+}

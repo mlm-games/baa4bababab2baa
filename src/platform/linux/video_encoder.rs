@@ -1,7 +1,6 @@
 use std::{
     borrow::Borrow,
     collections::VecDeque,
-    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -17,7 +16,7 @@ use crate::{
     error::Error,
     traits::{VideoEncoderInput, VideoEncoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, PixelFormat, Timestamp, VideoDecoderConfig,
+        Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig,
         VideoEncoderConfig, VideoFrame, VideoPlanes,
     },
 };
@@ -128,11 +127,11 @@ fn worker_loop(
     queue: Arc<AtomicU32>,
 ) {
     let display = match Display::open() {
-        Ok(d) => Rc::new(d),
-        Err(e) => {
-            let _ = pkt_tx.send(Err(Error::Platform(format!(
-                "VAAPI Display::open failed: {e:?}"
-            ))));
+        Some(d) => Arc::clone(&d),
+        None => {
+            let _ = pkt_tx.send(Err(Error::Platform(
+                "VAAPI Display::open failed".into(),
+            )));
             return;
         }
     };
@@ -175,7 +174,7 @@ fn worker_loop(
     };
 
     let mut pool = cros_codecs::backend::vaapi::surface_pool::VaSurfacePool::new(
-        Rc::clone(&display),
+        Arc::clone(&display),
         VA_RT_FORMAT_YUV420,
         Some(UsageHint::USAGE_HINT_ENCODER),
         coded_size,
@@ -247,6 +246,7 @@ fn worker_loop(
                 timestamp: frame.timestamp.as_micros() as u64,
                 layout: frame_layout.clone(),
                 force_keyframe,
+                force_idr: false,
             };
 
             if let Err(e) = encoder.encode(meta, handle) {
@@ -301,7 +301,7 @@ fn worker_loop(
 }
 
 fn create_vaapi_encoder(
-    display: &Rc<Display>,
+    display: &Arc<Display>,
     config: &VideoEncoderConfig,
     fourcc: Fourcc,
     coded_size: Resolution,
@@ -345,8 +345,8 @@ fn create_vaapi_encoder(
                 ..Default::default()
             };
 
-            let enc = cros_codecs::encoder::stateless::h264::StatelessEncoder::new_vaapi(
-                Rc::clone(display),
+            let enc = cros_codecs::encoder::stateless::h264::StatelessEncoder::new_native_vaapi(
+                Arc::clone(display),
                 cfg,
                 fourcc,
                 coded_size,
@@ -358,56 +358,9 @@ fn create_vaapi_encoder(
             Ok(Box::new(enc))
         }
 
-        "video/vp9" => {
-            use cros_codecs::encoder::{RateControl, Tunings};
-
-            let cfg = cros_codecs::encoder::vp9::EncoderConfig {
-                resolution: coded_size,
-                initial_tunings: Tunings {
-                    rate_control: RateControl::ConstantBitrate(bitrate),
-                    framerate,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            let enc = cros_codecs::encoder::stateless::vp9::StatelessEncoder::new_vaapi(
-                Rc::clone(display),
-                cfg,
-                fourcc,
-                coded_size,
-                low_power,
-                BlockingMode::NonBlocking,
-            )
-            .map_err(|e| Error::Platform(format!("create vp9 encoder failed: {e}")))?;
-
-            Ok(Box::new(enc))
-        }
-
-        "video/av01" | "video/av1" => {
-            use cros_codecs::encoder::{RateControl, Tunings};
-
-            let cfg = cros_codecs::encoder::av1::EncoderConfig {
-                resolution: coded_size,
-                initial_tunings: Tunings {
-                    rate_control: RateControl::ConstantBitrate(bitrate),
-                    framerate,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            let enc = cros_codecs::encoder::stateless::av1::StatelessEncoder::new_vaapi(
-                Rc::clone(display),
-                cfg,
-                fourcc,
-                coded_size,
-                low_power,
-                BlockingMode::NonBlocking,
-            )
-            .map_err(|e| Error::Platform(format!("create av1 encoder failed: {e}")))?;
-
-            Ok(Box::new(enc))
+        "video/vp9" | "video/av01" | "video/av1" => {
+            // TODO: VP9 and AV1 encoders need new_native_vaapi upstream
+            return Err(Error::Unsupported);
         }
 
         _ => Err(Error::Unsupported),
@@ -472,7 +425,7 @@ fn to_nv12_bytes(frame: &VideoFrame) -> Result<Vec<u8>, Error> {
 }
 
 fn upload_nv12(
-    display: &Rc<Display>,
+    _display: &Arc<Display>,
     nv12_fmt: &VAImageFormat,
     surface: &Surface<()>,
     width: u32,

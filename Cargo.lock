@@ -272,7 +272,7 @@ dependencies = [
 [[package]]
 name = "cros-codecs"
 version = "0.0.5"
-source = "git+https://github.com/mlm-games/cros-codecs?branch=main#a5dc00f9d2aefb33fcfa7d505e0e0c23145044cc"
+source = "git+https://github.com/mlm-games/cros-codecs?branch=main#baa78b22d0bd171da798c84618342e0332b0349c"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -291,7 +291,7 @@ dependencies = [
 [[package]]
 name = "cros-libva"
 version = "0.0.13"
-source = "git+https://github.com/mlm-games/cros-libva?branch=main#1bd9482c158adfd5a70647deb97a79923935ff4a"
+source = "git+https://github.com/mlm-games/cros-libva.git#ba36b968231402071b2e344d4dad5974040a74a2"
 dependencies = [
  "bindgen",
  "bitflags",
@@ -1119,3 +1119,8 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[patch.unused]]
+name = "cros-libva"
+version = "0.0.13"
+source = "git+https://github.com/mlm-games/cros-libva?branch=main#1bd9482c158adfd5a70647deb97a79923935ff4a"
