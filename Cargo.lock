@@ -977,7 +977,7 @@ dependencies = [
 [[package]]
 name = "web-codecs"
 version = "0.3.10"
-source = "git+https://github.com/mlm-games/web-rs.git?branch=main#30c1b03710ed9a248cbb4fb6a349244a8410f919"
+source = "git+https://github.com/mlm-games/web-rs.git?branch=main#25fbcbf51d15a02c4eb258f64e20df0b20dba5e2"
 dependencies = [
  "bytemuck",
  "bytes",
