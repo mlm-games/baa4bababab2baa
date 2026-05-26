@@ -83,7 +83,7 @@ pub struct WasmAudioEncoderOutput {
 
 impl AudioEncoderOutput for WasmAudioEncoderOutput {
     async fn packet(&mut self) -> Result<Option<EncodedAudioPacket>, Error> {
-        let pkt = self.inner.frame().await.map_err(|e| match e {
+        let pkt = self.inner.next().await.map_err(|e| match e {
             web_codecs::Error::Dropped => Error::Dropped,
             other => Error::Platform(format!("{other:?}")),
         })?;

@@ -100,6 +100,18 @@ impl VideoDecoderOutput for WasmVideoDecoderOutput {
     }
 }
 
+impl WasmVideoDecoderOutput {
+    pub fn try_frame(&mut self) -> Result<Option<VideoFrame>, Error> {
+        self.inner
+            .try_recv()
+            .map(|opt| opt.map(to_our_frame))
+            .map_err(|e| match e {
+                web_codecs::Error::Dropped => Error::Dropped,
+                other => Error::Platform(format!("{other:?}")),
+            })
+    }
+}
+
 pub fn create(
     config: VideoDecoderConfig,
 ) -> Result<(WasmVideoDecoderInput, WasmVideoDecoderOutput), Error> {
