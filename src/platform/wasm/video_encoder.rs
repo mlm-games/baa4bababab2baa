@@ -101,13 +101,8 @@ pub struct WasmVideoEncoderOutput {
     decoder_cfg: Option<VideoDecoderConfig>,
 }
 
-impl VideoEncoderOutput for WasmVideoEncoderOutput {
-    async fn packet(&mut self) -> Result<Option<EncodedVideoPacket>, Error> {
-        let pkt = self.inner.next().await.map_err(|e| match e {
-            web_codecs::Error::Dropped => Error::Dropped,
-            other => Error::Platform(format!("{other:?}")),
-        })?;
-
+impl WasmVideoEncoderOutput {
+    fn build_packet(&mut self, frame: EncodedFrame) -> EncodedVideoPacket {
         if let Some(wc_cfg) = self.inner.config() {
             self.decoder_cfg = Some(VideoDecoderConfig {
                 codec: crate::types::VideoCodecId(wc_cfg.codec.clone()),
@@ -118,12 +113,34 @@ impl VideoEncoderOutput for WasmVideoEncoderOutput {
                 hardware_acceleration: wc_cfg.hardware_acceleration,
             });
         }
+        EncodedVideoPacket {
+            payload: frame.payload,
+            timestamp: frame.timestamp,
+            keyframe: frame.keyframe,
+        }
+    }
 
-        Ok(pkt.map(|f: EncodedFrame| EncodedVideoPacket {
-            payload: f.payload,
-            timestamp: f.timestamp,
-            keyframe: f.keyframe,
-        }))
+    /// Non-blocking read -> returns `Ok(None)` if no frame is available yet.
+    pub fn try_packet(&mut self) -> Result<Option<EncodedVideoPacket>, Error> {
+        match self.inner.try_recv() {
+            Ok(Some(frame)) => Ok(Some(self.build_packet(frame))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(match e {
+                web_codecs::Error::Dropped => Error::Dropped,
+                other => Error::Platform(format!("{other:?}")),
+            }),
+        }
+    }
+}
+
+impl VideoEncoderOutput for WasmVideoEncoderOutput {
+    async fn packet(&mut self) -> Result<Option<EncodedVideoPacket>, Error> {
+        let pkt = self.inner.next().await.map_err(|e| match e {
+            web_codecs::Error::Dropped => Error::Dropped,
+            other => Error::Platform(format!("{other:?}")),
+        })?;
+
+        Ok(pkt.map(|f| self.build_packet(f)))
     }
 
     fn decoder_config(&self) -> Option<&VideoDecoderConfig> {
@@ -147,5 +164,3 @@ pub fn create(
         },
     ))
 }
-
-
