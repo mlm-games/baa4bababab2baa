@@ -50,6 +50,11 @@ impl VideoEncoderInput for WasmVideoEncoderInput {
             VideoPlanes::Cpu(data) => build_wasm_frame(&data, &frame.dimensions, frame.timestamp)?,
         };
 
+        // HACK: remove after confirmin  the root cause
+        self.inner
+            .reconfigure()
+            .map_err(|e| Error::Platform(format!("reconfigure: {e:?}")))?;
+
         let opts = VideoEncodeOptions {
             key_frame: keyframe,
         };
