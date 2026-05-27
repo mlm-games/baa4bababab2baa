@@ -87,16 +87,36 @@ pub struct WasmVideoDecoderOutput {
     inner: VideoDecoded,
 }
 
+/// Async version of `to_our_frame` that copies GPU pixel data to CPU memory
+async fn to_our_frame_copied(f: web_codecs::VideoFrame) -> Result<VideoFrame, Error> {
+    let dims = f.dimensions();
+    let ts = f.timestamp();
+    let fmt = f
+        .format()
+        .map(to_our_pixel_format)
+        .unwrap_or(PixelFormat::Nv12);
+    let data = f
+        .copy_to_cpu()
+        .await
+        .map_err(|e| Error::Platform(format!("copy_to_cpu: {e:?}")))?;
+    Ok(VideoFrame {
+        dimensions: Dimensions::new(dims.width, dims.height),
+        format: fmt,
+        timestamp: ts,
+        planes: VideoPlanes::Cpu(data),
+    })
+}
+
 impl VideoDecoderOutput for WasmVideoDecoderOutput {
     async fn frame(&mut self) -> Result<Option<VideoFrame>, Error> {
-        self.inner
-            .next()
-            .await
-            .map(|opt| opt.map(to_our_frame))
-            .map_err(|e| match e {
-                web_codecs::Error::Dropped => Error::Dropped,
-                other => Error::Platform(format!("{other:?}")),
-            })
+        let frame = self.inner.next().await.map_err(|e| match e {
+            web_codecs::Error::Dropped => Error::Dropped,
+            other => Error::Platform(format!("{other:?}")),
+        })?;
+        match frame {
+            Some(f) => Ok(Some(to_our_frame_copied(f).await?)),
+            None => Ok(None),
+        }
     }
 }
 
@@ -109,6 +129,15 @@ impl WasmVideoDecoderOutput {
                 web_codecs::Error::Dropped => Error::Dropped,
                 other => Error::Platform(format!("{other:?}")),
             })
+    }
+
+    /// Returns the raw `web_codecs::VideoFrame` without converting to [`VideoPlanes::Hardware`]. The caller can copy the
+    /// pixel data to CPU memory later via [`web_codecs::VideoFrame::copy_to_cpu`].
+    pub fn try_frame_raw(&mut self) -> Result<Option<web_codecs::VideoFrame>, Error> {
+        self.inner.try_recv().map_err(|e| match e {
+            web_codecs::Error::Dropped => Error::Dropped,
+            other => Error::Platform(format!("{other:?}")),
+        })
     }
 }
 
@@ -124,5 +153,3 @@ pub fn create(
         WasmVideoDecoderOutput { inner: decoded },
     ))
 }
-
-
