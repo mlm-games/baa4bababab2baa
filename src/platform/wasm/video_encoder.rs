@@ -50,11 +50,6 @@ impl VideoEncoderInput for WasmVideoEncoderInput {
             VideoPlanes::Cpu(data) => build_wasm_frame(&data, &frame.dimensions, frame.timestamp)?,
         };
 
-        // HACK: remove after confirmin  the root cause
-        self.inner
-            .reconfigure()
-            .map_err(|e| Error::Platform(format!("reconfigure: {e:?}")))?;
-
         let opts = VideoEncodeOptions {
             key_frame: keyframe,
         };
@@ -123,6 +118,14 @@ impl WasmVideoEncoderOutput {
             timestamp: frame.timestamp,
             keyframe: frame.keyframe,
         }
+    }
+
+    /// Check if the encoder's error callback has fired.
+    pub fn check_error(&self) -> Option<Error> {
+        self.inner.check_error().map(|e| match e {
+            web_codecs::Error::Dropped => Error::Dropped,
+            other => Error::Platform(format!("{other:?}")),
+        })
     }
 
     /// Non-blocking read -> returns `Ok(None)` if no frame is available yet.
