@@ -16,13 +16,14 @@ use crate::{
     error::Error,
     traits::{VideoEncoderInput, VideoEncoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig,
-        VideoEncoderConfig, VideoFrame, VideoPlanes,
+        Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoEncoderConfig,
+        VideoFrame, VideoPlanes,
     },
 };
 
 use cros_codecs::{
     BlockingMode, Fourcc, FrameLayout, PlaneLayout, Resolution,
+    backend::vaapi::surface_pool::VaSurfacePool,
     decoder::FramePool,
     encoder::{self, VideoEncoder as CcVideoEncoder},
     libva as va,
@@ -33,6 +34,15 @@ const VA_RT_FORMAT_YUV420: u32 = 0x00000001;
 
 use va::{Display, Image, Surface, UsageHint, VAImageFormat};
 
+type PooledSurface = cros_codecs::backend::vaapi::surface_pool::PooledVaSurface<()>;
+
+struct EncoderInit {
+    display: Arc<Display>,
+    nv12_fmt: VAImageFormat,
+    encoder: Box<dyn CcVideoEncoder<PooledSurface>>,
+    pool: VaSurfacePool<()>,
+    frame_layout: FrameLayout,
+}
 
 enum Cmd {
     Encode(VideoFrame, Option<bool>),
@@ -87,6 +97,69 @@ impl VideoEncoderOutput for CrosVideoEncoderOutput {
     }
 }
 
+fn init_encoder_inner(config: &VideoEncoderConfig) -> Result<EncoderInit, Error> {
+    let display =
+        Display::open().ok_or_else(|| Error::Platform("VAAPI Display::open failed".into()))?;
+
+    let nv12_fmt = display
+        .query_image_formats()
+        .map_err(|e| Error::Platform(format!("query_image_formats failed: {e:?}")))?
+        .into_iter()
+        .find(|f| f.fourcc == VA_FOURCC_NV12)
+        .ok_or_else(|| {
+            Error::Platform("VAAPI driver does not expose NV12 mapping format".into())
+        })?;
+
+    let width = config.dimensions.width;
+    let height = config.dimensions.height;
+
+    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        return Err(Error::InvalidConfig(
+            "dimensions must be non-zero and even (for NV12 4:2:0)".into(),
+        ));
+    }
+
+    let coded_size = Resolution { width, height };
+    let input_fourcc = Fourcc::from(b"NV12");
+
+    let encoder = create_vaapi_encoder(&display, config, input_fourcc, coded_size)?;
+
+    let mut pool = VaSurfacePool::new(
+        Arc::clone(&display),
+        VA_RT_FORMAT_YUV420,
+        Some(UsageHint::USAGE_HINT_ENCODER),
+        coded_size,
+    );
+
+    pool.add_frames(vec![(); 16])
+        .map_err(|e| Error::Platform(format!("create VA surfaces failed: {e:?}")))?;
+
+    let frame_layout = FrameLayout {
+        format: (input_fourcc, 0),
+        size: coded_size,
+        planes: vec![
+            PlaneLayout {
+                buffer_index: 0,
+                offset: 0,
+                stride: width as usize,
+            },
+            PlaneLayout {
+                buffer_index: 0,
+                offset: (width * height) as usize,
+                stride: width as usize,
+            },
+        ],
+    };
+
+    Ok(EncoderInit {
+        display,
+        nv12_fmt,
+        encoder,
+        pool,
+        frame_layout,
+    })
+}
+
 pub fn create(
     config: VideoEncoderConfig,
 ) -> Result<(CrosVideoEncoderInput, CrosVideoEncoderOutput), Error> {
@@ -100,12 +173,26 @@ pub fn create(
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (pkt_tx, pkt_rx) = mpsc::unbounded_channel();
+    let (init_tx, init_rx) = oneshot::channel();
 
     let queue = Arc::new(AtomicU32::new(0));
     let queue2 = queue.clone();
 
     let config_clone = config.clone();
-    thread::spawn(move || worker_loop(config_clone, cmd_rx, pkt_tx, queue2));
+    thread::spawn(move || {
+        let result = init_encoder_inner(&config_clone);
+        match result {
+            Ok(init) => {
+                let _ = init_tx.send(Ok(()));
+                worker_loop(config_clone, cmd_rx, pkt_tx, queue2, init);
+            }
+            Err(e) => {
+                let _ = init_tx.send(Err(e));
+            }
+        }
+    });
+
+    init_rx.blocking_recv().map_err(|_| Error::Dropped)??;
 
     Ok((
         CrosVideoEncoderInput {
@@ -125,84 +212,18 @@ fn worker_loop(
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     pkt_tx: mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
     queue: Arc<AtomicU32>,
+    init: EncoderInit,
 ) {
-    let display = match Display::open() {
-        Some(d) => Arc::clone(&d),
-        None => {
-            let _ = pkt_tx.send(Err(Error::Platform(
-                "VAAPI Display::open failed".into(),
-            )));
-            return;
-        }
-    };
-
-    let nv12_fmt = match display.query_image_formats() {
-        Ok(fmts) => fmts.into_iter().find(|f| f.fourcc == VA_FOURCC_NV12),
-        Err(e) => {
-            let _ = pkt_tx.send(Err(Error::Platform(format!(
-                "query_image_formats failed: {e:?}"
-            ))));
-            return;
-        }
-    };
-    let Some(nv12_fmt) = nv12_fmt else {
-        let _ = pkt_tx.send(Err(Error::Platform(
-            "VAAPI driver does not expose NV12 mapping format".into(),
-        )));
-        return;
-    };
+    let EncoderInit {
+        display,
+        nv12_fmt,
+        mut encoder,
+        mut pool,
+        frame_layout,
+    } = init;
 
     let width = config.dimensions.width;
     let height = config.dimensions.height;
-
-    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
-        let _ = pkt_tx.send(Err(Error::InvalidConfig(
-            "dimensions must be non-zero and even (for NV12 4:2:0)".into(),
-        )));
-        return;
-    }
-
-    let coded_size = Resolution { width, height };
-    let input_fourcc = Fourcc::from(b"NV12");
-
-    let mut encoder = match create_vaapi_encoder(&display, &config, input_fourcc, coded_size) {
-        Ok(e) => e,
-        Err(e) => {
-            let _ = pkt_tx.send(Err(e));
-            return;
-        }
-    };
-
-    let mut pool = cros_codecs::backend::vaapi::surface_pool::VaSurfacePool::new(
-        Arc::clone(&display),
-        VA_RT_FORMAT_YUV420,
-        Some(UsageHint::USAGE_HINT_ENCODER),
-        coded_size,
-    );
-
-    if let Err(e) = pool.add_frames(vec![(); 16]) {
-        let _ = pkt_tx.send(Err(Error::Platform(format!(
-            "create VA surfaces failed: {e:?}"
-        ))));
-        return;
-    }
-
-    let frame_layout = FrameLayout {
-        format: (input_fourcc, 0),
-        size: coded_size,
-        planes: vec![
-            PlaneLayout {
-                buffer_index: 0,
-                offset: 0,
-                stride: width as usize,
-            },
-            PlaneLayout {
-                buffer_index: 0,
-                offset: (width * height) as usize,
-                stride: width as usize,
-            },
-        ],
-    };
 
     let mut pending: VecDeque<(VideoFrame, bool)> = VecDeque::new();
     let mut flushing: Option<oneshot::Sender<Result<(), Error>>> = None;
@@ -227,7 +248,7 @@ fn worker_loop(
                 break;
             };
 
-            let surface: &Surface<()> = handle.borrow();
+            let surface: &Surface<()> = Borrow::borrow(&handle);
 
             let nv12 = match to_nv12_bytes(&frame) {
                 Ok(v) => v,
