@@ -95,7 +95,7 @@ fn drain_output(codec: &mut MediaCodec, frame_tx: &mpsc::UnboundedSender<Result<
         let h = out_buf.format().get_i32("height").unwrap_or(0) as u32;
         let ts_us = out_buf.info().presentation_time_us;
         let data = out_buf
-            .buffer_slice_pub()
+            .buffer_slice()
             .map(|s| s.to_vec())
             .unwrap_or_default();
         let frame = VideoFrame {

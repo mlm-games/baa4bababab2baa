@@ -147,7 +147,7 @@ fn encode_loop(
                 || BufferFlag::Encode.is_contained_in(info.flags as i32);
             let ts = std::time::Duration::from_micros(info.presentation_time_us as u64);
 
-            let payload_bytes = if let Some(slice) = out_buf.buffer_slice_pub() {
+            let payload_bytes = if let Some(slice) = out_buf.buffer_slice() {
                 bytes::Bytes::copy_from_slice(slice)
             } else {
                 bytes::Bytes::new()
