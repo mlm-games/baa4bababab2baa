@@ -131,7 +131,7 @@ fn encode_loop(
                 }
                 buf.set_time(frame.timestamp.as_micros() as u64);
                 if keyframe.unwrap_or(false) {
-                    buf.set_flags(mediacodec::BufferFlag::CodecConfig as u32);
+                    buf.set_flags(mediacodec::BufferFlag::Encode as u32);
                 }
                 queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             } else {
