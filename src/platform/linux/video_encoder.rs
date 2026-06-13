@@ -28,6 +28,7 @@ use cros_codecs::{
     decoder::FramePool,
     encoder::{self, VideoEncoder as CcVideoEncoder},
     libva as va,
+    utils::align_up,
 };
 
 const VA_FOURCC_NV12: u32 = 0x3231564E;
@@ -126,7 +127,12 @@ fn init_encoder_inner(config: &VideoEncoderConfig) -> Result<EncoderInit, Error>
         ));
     }
 
-    let coded_size = Resolution { width, height };
+    let coded_w = align_up(width, 16); // for av1 when supported
+    let coded_h = align_up(height, 16);
+    let coded_size = Resolution {
+        width: coded_w,
+        height: coded_h,
+    };
     let input_fourcc = Fourcc::from(b"NV12");
 
     let encoder = create_vaapi_encoder(&display, config, input_fourcc, coded_size)?;
@@ -245,7 +251,10 @@ fn worker_loop(
                 Cmd::Flush(done) => {
                     flushing = Some(done);
                 }
-                Cmd::Close => return,
+                Cmd::Close => {
+                    queue.store(0, Ordering::Relaxed);
+                    return;
+                }
             }
         }
 
@@ -261,12 +270,14 @@ fn worker_loop(
                 Ok(v) => v,
                 Err(e) => {
                     let _ = pkt_tx.send(Err(e));
+                    queue.store(0, Ordering::Relaxed);
                     return;
                 }
             };
 
             if let Err(e) = upload_nv12(&nv12_fmt, surface, width, height, &nv12) {
                 let _ = pkt_tx.send(Err(e));
+                queue.store(0, Ordering::Relaxed);
                 return;
             }
 
@@ -279,6 +290,7 @@ fn worker_loop(
 
             if let Err(e) = encoder.encode(meta, handle) {
                 let _ = pkt_tx.send(Err(Error::Platform(format!("encode failed: {e}"))));
+                queue.store(0, Ordering::Relaxed);
                 return;
             }
         }
@@ -298,6 +310,7 @@ fn worker_loop(
                 Ok(c) => c,
                 Err(e) => {
                     let _ = pkt_tx.send(Err(Error::Platform(format!("poll failed: {e}"))));
+                    queue.store(0, Ordering::Relaxed);
                     return;
                 }
             };
@@ -316,11 +329,13 @@ fn worker_loop(
             };
 
             if pkt_tx.send(Ok(pkt)).is_err() {
+                queue.store(0, Ordering::Relaxed);
                 return;
             }
         }
 
         if cmd_rx.is_closed() && pending.is_empty() {
+            queue.store(0, Ordering::Relaxed);
             return;
         }
 

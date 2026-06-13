@@ -181,11 +181,15 @@ fn worker_loop(
 
     loop {
         let Some(cmd) = cmd_rx.blocking_recv() else {
+            queue.store(0, Ordering::Relaxed);
             return;
         };
 
         match cmd {
-            Cmd::Close => return,
+            Cmd::Close => {
+                queue.store(0, Ordering::Relaxed);
+                return;
+            }
 
             Cmd::Flush(done) => {
                 let res = (|| -> Result<(), Error> {
@@ -230,6 +234,7 @@ fn worker_loop(
 
                 if let Err(e) = res {
                     let _ = frame_tx.send(Err(e));
+                    queue.store(0, Ordering::Relaxed);
                     return;
                 }
             }
