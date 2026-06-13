@@ -1,5 +1,4 @@
 use std::{
-    cell::RefCell,
     path::PathBuf,
     sync::Arc,
     sync::atomic::{AtomicU32, Ordering},
@@ -45,6 +44,12 @@ pub struct CrosVideoDecoderInput {
 
 pub struct CrosVideoDecoderOutput {
     rx: mpsc::UnboundedReceiver<Result<VideoFrame, Error>>,
+}
+
+impl Drop for CrosVideoDecoderInput {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Cmd::Close);
+    }
 }
 
 impl VideoDecoderInput for CrosVideoDecoderInput {
@@ -145,7 +150,19 @@ fn worker_loop(
             .expect("Could not open GBM device (/dev/dri/renderD128)"),
     );
 
-    let frame_queue: RefCell<Vec<GenericDmaVideoFrame>> = RefCell::new(Vec::new());
+    let mut frame_queue: Vec<GenericDmaVideoFrame> = Vec::new();
+    let mut decoder: Option<DynStatelessVideoDecoder<GenericDmaVideoFrame>> = None;
+
+    fn codec_to_fmt(codec: &str) -> Result<EncodedFormat, String> {
+        match codec {
+            "video/avc" | "video/h264" => Ok(EncodedFormat::H264),
+            "video/hevc" | "video/h265" => Ok(EncodedFormat::H265),
+            "video/vp8" => Ok(EncodedFormat::VP8),
+            "video/vp9" => Ok(EncodedFormat::VP9),
+            "video/av01" | "video/av1" => Ok(EncodedFormat::AV1),
+            _ => Err(format!("unsupported codec string: {codec}")),
+        }
+    }
 
     let gbm2 = Arc::clone(&gbm);
     let mut alloc_frame = move |stream_info: &StreamInfo| -> GenericDmaVideoFrame {
@@ -162,22 +179,6 @@ fn worker_loop(
             .expect("GBM->DMA export failed")
     };
 
-    let mut alloc = || frame_queue.borrow_mut().pop();
-
-    let decoder: RefCell<Option<DynStatelessVideoDecoder<GenericDmaVideoFrame>>> =
-        RefCell::new(None);
-
-    fn codec_to_fmt(codec: &str) -> Result<EncodedFormat, String> {
-        match codec {
-            "video/avc" | "video/h264" => Ok(EncodedFormat::H264),
-            "video/hevc" | "video/h265" => Ok(EncodedFormat::H265),
-            "video/vp8" => Ok(EncodedFormat::VP8),
-            "video/vp9" => Ok(EncodedFormat::VP9),
-            "video/av01" | "video/av1" => Ok(EncodedFormat::AV1),
-            _ => Err(format!("unsupported codec string: {codec}")),
-        }
-    }
-
     loop {
         let Some(cmd) = cmd_rx.blocking_recv() else {
             return;
@@ -188,10 +189,9 @@ fn worker_loop(
 
             Cmd::Flush(done) => {
                 let res = (|| -> Result<(), Error> {
-                    let mut dec = decoder.borrow_mut();
-                    if let Some(dec) = dec.as_mut() {
+                    if let Some(dec) = decoder.as_mut() {
                         dec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
-                        drain_events(dec, &frame_queue, &frame_tx, &mut alloc_frame)?;
+                        drain_events(dec, &mut frame_queue, &frame_tx, &mut alloc_frame)?;
                     }
                     Ok(())
                 })();
@@ -204,26 +204,25 @@ fn worker_loop(
                 let res = (|| -> Result<(), Error> {
                     let fmt = codec_to_fmt(&codec_string)?;
 
-                    let mut dec_borrow = decoder.borrow_mut();
-                    if dec_borrow.is_none() {
-                        *dec_borrow = Some(make_decoder(fmt)?);
+                    if decoder.is_none() {
+                        decoder = Some(make_decoder(fmt)?);
                     }
-                    let dec = dec_borrow.as_mut().unwrap();
+                    let dec = decoder.as_mut().unwrap();
 
                     let mut remaining = pkt.payload.as_ref();
                     let ts_us = pkt.timestamp.as_micros() as u64;
 
                     while !remaining.is_empty() {
-                        match dec.decode(ts_us, remaining, &mut alloc) {
+                        match dec.decode(ts_us, remaining, &mut || frame_queue.pop()) {
                             Ok(n) => remaining = &remaining[n..],
                             Err(
                                 DecodeError::NotEnoughOutputBuffers(_) | DecodeError::CheckEvents,
                             ) => {
-                                drain_events(dec, &frame_queue, &frame_tx, &mut alloc_frame)?;
+                                drain_events(dec, &mut frame_queue, &frame_tx, &mut alloc_frame)?;
                             }
                             Err(e) => return Err(Error::Platform(format!("{e:?}"))),
                         }
-                        drain_events(dec, &frame_queue, &frame_tx, &mut alloc_frame)?;
+                        drain_events(dec, &mut frame_queue, &frame_tx, &mut alloc_frame)?;
                     }
 
                     Ok(())
@@ -240,7 +239,7 @@ fn worker_loop(
 
 fn drain_events<F: CcVideoFrame + 'static>(
     dec: &mut DynStatelessVideoDecoder<F>,
-    frame_queue: &RefCell<Vec<GenericDmaVideoFrame>>,
+    frame_queue: &mut Vec<GenericDmaVideoFrame>,
     frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
     alloc_frame: &mut dyn FnMut(&StreamInfo) -> GenericDmaVideoFrame,
 ) -> Result<(), Error> {
@@ -248,9 +247,9 @@ fn drain_events<F: CcVideoFrame + 'static>(
         match ev {
             DecoderEvent::FormatChanged => {
                 if let Some(info) = dec.stream_info() {
-                    let n = frame_queue.borrow().len();
-                    for _ in n..info.min_num_frames {
-                        frame_queue.borrow_mut().push(alloc_frame(info));
+                    frame_queue.clear();
+                    for _ in 0..info.min_num_frames {
+                        frame_queue.push(alloc_frame(info));
                     }
                 }
             }

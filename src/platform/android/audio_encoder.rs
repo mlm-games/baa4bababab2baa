@@ -128,7 +128,7 @@ fn audio_encode_loop(
         while let Ok(out) = codec.dequeue_output() {
             let out_buf: mediacodec::CodecOutputBuffer = out;
             let info = out_buf.info();
-            let is_key = BufferFlag::CodecConfig.is_contained_in(info.flags as i32);
+            let is_key = false;
             let ts = std::time::Duration::from_micros(info.presentation_time_us as u64);
 
             let payload = if let Some(slice) = out_buf.buffer_slice() {

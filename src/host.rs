@@ -4,25 +4,13 @@ use crate::types::{
 };
 
 #[cfg(target_arch = "wasm32")]
-use crate::platform::wasm::{
-    WasmAudioDecoderInput, WasmAudioDecoderOutput, WasmAudioEncoderInput, WasmAudioEncoderOutput,
-    WasmVideoDecoderInput, WasmVideoDecoderOutput, WasmVideoEncoderInput, WasmVideoEncoderOutput,
-    WebCodecsHost,
-};
+use crate::platform::wasm::WebCodecsHost;
 
 #[cfg(target_os = "android")]
-use crate::platform::android::{
-    AndroidAudioDecoderInput, AndroidAudioDecoderOutput, AndroidAudioEncoderInput,
-    AndroidAudioEncoderOutput, AndroidVideoDecoderInput, AndroidVideoDecoderOutput,
-    AndroidVideoEncoderInput, AndroidVideoEncoderOutput, MediaCodecHost,
-};
+use crate::platform::android::MediaCodecHost;
 
 #[cfg(all(target_os = "linux", feature = "linux"))]
-use crate::platform::linux::{
-    CrosAudioDecoderInput, CrosAudioDecoderOutput, CrosAudioEncoderInput, CrosAudioEncoderOutput,
-    CrosCodecsHost, CrosVideoDecoderInput, CrosVideoDecoderOutput, CrosVideoEncoderInput,
-    CrosVideoEncoderOutput,
-};
+use crate::platform::linux::CrosCodecsHost;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostId {

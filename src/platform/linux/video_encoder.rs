@@ -4,6 +4,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
+        mpsc as std_mpsc,
     },
     thread,
     time::Duration,
@@ -59,6 +60,12 @@ pub struct CrosVideoEncoderInput {
 pub struct CrosVideoEncoderOutput {
     rx: mpsc::UnboundedReceiver<Result<EncodedVideoPacket, Error>>,
     decoder_cfg: Option<VideoDecoderConfig>,
+}
+
+impl Drop for CrosVideoEncoderInput {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Cmd::Close);
+    }
 }
 
 impl VideoEncoderInput for CrosVideoEncoderInput {
@@ -173,7 +180,7 @@ pub fn create(
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (pkt_tx, pkt_rx) = mpsc::unbounded_channel();
-    let (init_tx, init_rx) = oneshot::channel();
+    let (init_tx, init_rx) = std_mpsc::channel();
 
     let queue = Arc::new(AtomicU32::new(0));
     let queue2 = queue.clone();
@@ -192,7 +199,7 @@ pub fn create(
         }
     });
 
-    init_rx.blocking_recv().map_err(|_| Error::Dropped)??;
+    init_rx.recv().map_err(|_| Error::Dropped)??;
 
     Ok((
         CrosVideoEncoderInput {
@@ -215,7 +222,7 @@ fn worker_loop(
     init: EncoderInit,
 ) {
     let EncoderInit {
-        display,
+        display: _display,
         nv12_fmt,
         mut encoder,
         mut pool,
@@ -258,7 +265,7 @@ fn worker_loop(
                 }
             };
 
-            if let Err(e) = upload_nv12(&display, &nv12_fmt, surface, width, height, &nv12) {
+            if let Err(e) = upload_nv12(&nv12_fmt, surface, width, height, &nv12) {
                 let _ = pkt_tx.send(Err(e));
                 return;
             }
@@ -446,7 +453,6 @@ fn to_nv12_bytes(frame: &VideoFrame) -> Result<Vec<u8>, Error> {
 }
 
 fn upload_nv12(
-    _display: &Arc<Display>,
     nv12_fmt: &VAImageFormat,
     surface: &Surface<()>,
     width: u32,
@@ -490,10 +496,11 @@ fn upload_nv12(
         }
     }
 
+    drop(image);
+
     surface
         .sync()
         .map_err(|e| Error::Platform(format!("surface.sync failed: {e:?}")))?;
 
-    drop(image);
     Ok(())
 }

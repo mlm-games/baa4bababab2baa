@@ -73,6 +73,7 @@ pub fn create(
         format.set_i32("frame-rate", fr as i32);
     }
     format.set_i32("i-frame-interval", 1);
+    format.set_i32("color-format", 21); // COLOR_FormatYUV420SemiPlanar (NV12)
 
     let mime = config.codec.0.clone();
     let mut codec = MediaCodec::create_encoder(&mime)
@@ -143,8 +144,7 @@ fn encode_loop(
         while let Ok(out) = codec.dequeue_output() {
             let out_buf: mediacodec::CodecOutputBuffer = out;
             let info = out_buf.info();
-            let is_key = BufferFlag::CodecConfig.is_contained_in(info.flags as i32)
-                || BufferFlag::Encode.is_contained_in(info.flags as i32);
+            let is_key = BufferFlag::Encode.is_contained_in(info.flags as i32);
             let ts = std::time::Duration::from_micros(info.presentation_time_us as u64);
 
             let payload_bytes = if let Some(slice) = out_buf.buffer_slice() {

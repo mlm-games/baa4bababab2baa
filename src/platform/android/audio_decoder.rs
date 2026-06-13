@@ -72,8 +72,12 @@ pub fn create(
     let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Result<AudioFrame, Error>>();
     let queue = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let queue2 = queue.clone();
+    let fallback_channels = config.channel_count;
+    let fallback_sample_rate = config.sample_rate;
 
-    thread::spawn(move || audio_decode_loop(codec, pkt_rx, frame_tx, queue2));
+    thread::spawn(move || {
+        audio_decode_loop(codec, pkt_rx, frame_tx, queue2, fallback_channels, fallback_sample_rate)
+    });
 
     Ok((
         AndroidAudioDecoderInput { tx: pkt_tx, queue },
@@ -86,6 +90,8 @@ fn audio_decode_loop(
     mut pkt_rx: mpsc::UnboundedReceiver<EncodedAudioPacket>,
     frame_tx: mpsc::UnboundedSender<Result<AudioFrame, Error>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    fallback_channels: u32,
+    fallback_sample_rate: u32,
 ) {
     let mut pending: std::collections::VecDeque<EncodedAudioPacket> =
         std::collections::VecDeque::new();
@@ -115,8 +121,8 @@ fn audio_decode_loop(
         while let Ok(out_buf) = codec.dequeue_output() {
             let out_buf: CodecOutputBuffer = out_buf;
             let fmt = out_buf.format();
-            let channels = fmt.get_i32("channel-count").unwrap_or(2) as u32;
-            let sample_rate = fmt.get_i32("sample-rate").unwrap_or(48_000) as u32;
+            let channels = fmt.get_i32("channel-count").map(|v| v as u32).unwrap_or(fallback_channels);
+            let sample_rate = fmt.get_i32("sample-rate").map(|v| v as u32).unwrap_or(fallback_sample_rate);
             let ts =
                 std::time::Duration::from_micros(out_buf.info().presentation_time_us as u64);
 

@@ -7,8 +7,8 @@ use crate::{
     error::Error,
     traits::{VideoEncoderInput, VideoEncoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, VideoDecoderConfig, VideoEncoderConfig, VideoFrame,
-        VideoPlanes,
+        Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoEncoderConfig,
+        VideoFrame, VideoPlanes,
     },
 };
 
@@ -47,7 +47,9 @@ impl VideoEncoderInput for WasmVideoEncoderInput {
                     "Cannot re-encode a hardware VideoFrame on WASM".into(),
                 ));
             }
-            VideoPlanes::Cpu(data) => build_wasm_frame(&data, &frame.dimensions, frame.timestamp)?,
+            VideoPlanes::Cpu(data) => {
+                build_wasm_frame(&data, &frame.dimensions, frame.format, frame.timestamp)?
+            }
         };
 
         let opts = VideoEncodeOptions {
@@ -77,6 +79,7 @@ impl VideoEncoderInput for WasmVideoEncoderInput {
 fn build_wasm_frame(
     data: &[u8],
     dims: &Dimensions,
+    format: PixelFormat,
     timestamp: crate::types::Timestamp,
 ) -> Result<web_codecs::VideoFrame, Error> {
     use js_sys::Uint8Array;
@@ -84,10 +87,17 @@ fn build_wasm_frame(
 
     let array = Uint8Array::from(data);
 
+    let wc_format = match format {
+        PixelFormat::Yuv420p => VideoPixelFormat::I420,
+        PixelFormat::Nv12 => VideoPixelFormat::Nv12,
+        PixelFormat::Rgba8 => VideoPixelFormat::Rgba,
+        PixelFormat::Bgra8 => VideoPixelFormat::Bgra,
+    };
+
     let init = VideoFrameBufferInit::new_with_f64(
         dims.height,
         dims.width,
-        VideoPixelFormat::Rgba,
+        wc_format,
         timestamp.as_micros() as f64,
     );
 

@@ -50,16 +50,23 @@ impl CrosCodecsHost {
 
     pub async fn is_video_decoder_supported(
         &self,
-        _config: &VideoDecoderConfig,
+        config: &VideoDecoderConfig,
     ) -> Result<bool, Error> {
-        Ok(true)
+        Ok(matches!(
+            config.codec.0.as_str(),
+            "video/avc" | "video/h264" | "video/hevc" | "video/h265"
+                | "video/vp8" | "video/vp9" | "video/av01" | "video/av1"
+        ))
     }
 
     pub async fn is_video_encoder_supported(
         &self,
-        _config: &VideoEncoderConfig,
+        config: &VideoEncoderConfig,
     ) -> Result<bool, Error> {
-        Ok(false)
+        Ok(matches!(
+            config.codec.0.as_str(),
+            "video/avc" | "video/h264"
+        ))
     }
 
     pub async fn is_audio_encoder_supported(

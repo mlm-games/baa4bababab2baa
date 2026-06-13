@@ -134,9 +134,6 @@ fn decode_loop(
                 }
                 buf.set_write_size(copy_len);
                 buf.set_time(pkt.timestamp.as_micros() as u64);
-                if pkt.keyframe {
-                    buf.set_flags(mediacodec::BufferFlag::CodecConfig as u32);
-                }
                 queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             } else {
                 pending.push_front(pkt);
