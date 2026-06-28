@@ -110,39 +110,35 @@ pub fn create(
 
 fn make_decoder(
     fmt: EncodedFormat,
+    display: &Arc<libva::Display>,
 ) -> Result<DynStatelessVideoDecoder<GenericDmaVideoFrame>, String> {
     match fmt {
         EncodedFormat::H264 => Ok(StatelessDecoder::<H264, _>::new_vaapi(
-            libva::Display::open()
-                .ok_or("failed to open libva display")?,
+            display.clone(),
             BlockingMode::NonBlocking,
         )
         .map_err(|e| format!("failed to create H264 decoder: {e}"))?
         .into_trait_object()),
         EncodedFormat::H265 => Ok(StatelessDecoder::<H265, _>::new_vaapi(
-            libva::Display::open()
-                .ok_or("failed to open libva display")?,
+            display.clone(),
             BlockingMode::NonBlocking,
         )
         .map_err(|e| format!("failed to create H265 decoder: {e}"))?
         .into_trait_object()),
         EncodedFormat::VP8 => Ok(StatelessDecoder::<Vp8, _>::new_vaapi(
-            libva::Display::open()
-                .ok_or("failed to open libva display")?,
+            display.clone(),
             BlockingMode::NonBlocking,
         )
         .map_err(|e| format!("failed to create VP8 decoder: {e}"))?
         .into_trait_object()),
         EncodedFormat::VP9 => Ok(StatelessDecoder::<Vp9, _>::new_vaapi(
-            libva::Display::open()
-                .ok_or("failed to open libva display")?,
+            display.clone(),
             BlockingMode::NonBlocking,
         )
         .map_err(|e| format!("failed to create VP9 decoder: {e}"))?
         .into_trait_object()),
         EncodedFormat::AV1 => Ok(StatelessDecoder::<Av1, _>::new_vaapi(
-            libva::Display::open()
-                .ok_or("failed to open libva display")?,
+            display.clone(),
             BlockingMode::NonBlocking,
         )
         .map_err(|e| format!("failed to create AV1 decoder: {e}"))?
@@ -217,7 +213,7 @@ fn worker_loop(
                     let fmt = codec_to_fmt(&codec_string)?;
 
                     if decoder.is_none() {
-                        decoder = Some(make_decoder(fmt)?);
+                        decoder = Some(make_decoder(fmt, &va_display)?);
                     }
                     let dec = decoder.as_mut().unwrap();
 
@@ -242,7 +238,6 @@ fn worker_loop(
                             ) => {
                                 no_progress_count += 1;
                                 if no_progress_count > 50 {
-                                    eprintln!("[VAAPI] no progress after 50 iterations, aborting");
                                     return Err(Error::Platform("no decode progress".into()));
                                 }
                             }
