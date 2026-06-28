@@ -118,10 +118,8 @@ impl VideoDecoderOutput for WasmVideoDecoderOutput {
             None => Ok(None),
         }
     }
-}
 
-impl WasmVideoDecoderOutput {
-    pub fn try_frame(&mut self) -> Result<Option<VideoFrame>, Error> {
+    fn try_frame(&mut self) -> Result<Option<VideoFrame>, Error> {
         self.inner
             .try_recv()
             .map(|opt| opt.map(to_our_frame))
@@ -130,6 +128,9 @@ impl WasmVideoDecoderOutput {
                 other => Error::Platform(format!("{other:?}")),
             })
     }
+}
+
+impl WasmVideoDecoderOutput {
 
     /// Returns the raw `web_codecs::VideoFrame` without converting to [`VideoPlanes::Hardware`]. The caller can copy the
     /// pixel data to CPU memory later via [`web_codecs::VideoFrame::copy_to_cpu`].

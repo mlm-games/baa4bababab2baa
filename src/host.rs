@@ -130,6 +130,10 @@ impl crate::traits::VideoDecoderOutput for NoBackendVideoDecoderOutput {
     async fn frame(&mut self) -> Result<Option<crate::types::VideoFrame>, Error> {
         Err(Error::NoBackend)
     }
+
+    fn try_frame(&mut self) -> Result<Option<crate::types::VideoFrame>, Error> {
+        Err(Error::NoBackend)
+    }
 }
 
 #[cfg(all(target_os = "linux", not(feature = "linux")))]

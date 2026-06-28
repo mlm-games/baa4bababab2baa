@@ -60,6 +60,15 @@ impl VideoDecoderOutput for AndroidVideoDecoderOutput {
             None => Ok(None),
         }
     }
+
+    fn try_frame(&mut self) -> Result<Option<VideoFrame>, Error> {
+        match self.rx.try_recv() {
+            Ok(Ok(frame)) => Ok(Some(frame)),
+            Ok(Err(e)) => Err(e),
+            Err(mpsc::error::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::error::TryRecvError::Disconnected) => Ok(None),
+        }
+    }
 }
 
 pub fn create(

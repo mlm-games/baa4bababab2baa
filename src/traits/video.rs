@@ -35,4 +35,5 @@ pub trait VideoDecoderInput: MaybeSend {
 
 pub trait VideoDecoderOutput: MaybeSend {
     fn frame(&mut self) -> impl Future<Output = Result<Option<VideoFrame>, Error>> + MaybeSend;
+    fn try_frame(&mut self) -> Result<Option<VideoFrame>, Error>;
 }
