@@ -131,7 +131,6 @@ impl VideoDecoderOutput for WasmVideoDecoderOutput {
 }
 
 impl WasmVideoDecoderOutput {
-
     /// Returns the raw `web_codecs::VideoFrame` without converting to [`VideoPlanes::Hardware`]. The caller can copy the
     /// pixel data to CPU memory later via [`web_codecs::VideoFrame::copy_to_cpu`].
     pub fn try_frame_raw(&mut self) -> Result<Option<web_codecs::VideoFrame>, Error> {
@@ -142,15 +141,41 @@ impl WasmVideoDecoderOutput {
     }
 }
 
+/// Map a MIME-type codec identifier to WebCodecs full codec strings.
+fn mime_to_codec_strings(mime: &str) -> Vec<&str> {
+    match mime {
+        "video/avc" => vec!["avc1.42001E", "avc1.4D001E", "avc1.64001E"],
+        "video/hevc" => vec!["hvc1.1.6.L93.B0", "hev1.1.6.L93.B0"],
+        "video/av01" => vec!["av01.0.04M.08"],
+        "video/vp9" => vec!["vp09.00.10.08"],
+        "video/vp8" => vec!["vp8"],
+        _ => vec![mime],
+    }
+}
+
 pub fn create(
     config: VideoDecoderConfig,
 ) -> Result<(WasmVideoDecoderInput, WasmVideoDecoderOutput), Error> {
-    let wc_cfg = to_wc_config(&config);
-    let (dec, decoded) = wc_cfg
-        .build()
-        .map_err(|e| Error::Platform(format!("{e:?}")))?;
-    Ok((
-        WasmVideoDecoderInput { inner: dec },
-        WasmVideoDecoderOutput { inner: decoded },
-    ))
+    let candidates = mime_to_codec_strings(&config.codec.0);
+    let mut last_err = None;
+
+    for codec_str in candidates {
+        let mut wc_cfg = to_wc_config(&config);
+        wc_cfg.codec = codec_str.to_string();
+
+        match wc_cfg.build() {
+            Ok((dec, decoded)) => {
+                return Ok((
+                    WasmVideoDecoderInput { inner: dec },
+                    WasmVideoDecoderOutput { inner: decoded },
+                ));
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    Err(Error::Platform(format!(
+        "No supported codec variant for {:?}: {:?}",
+        config.codec.0, last_err
+    )))
 }
