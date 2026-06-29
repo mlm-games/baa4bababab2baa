@@ -18,7 +18,9 @@ use crate::{
 
 use cros_codecs::{
     BlockingMode, EncodedFormat, Fourcc, FrameLayout, PlaneLayout, Resolution,
-    decoder::stateless::{DecodeError, DynStatelessVideoDecoder, StatelessDecoder, StatelessVideoDecoder},
+    decoder::stateless::{
+        DecodeError, DynStatelessVideoDecoder, StatelessDecoder, StatelessVideoDecoder,
+    },
     decoder::stateless::{av1::Av1, h264::H264, h265::H265, vp8::Vp8, vp9::Vp9},
     decoder::{DecodedHandle, DecoderEvent, StreamInfo},
     image_processing::nv12_to_i420,
@@ -95,17 +97,43 @@ pub fn create(
     config: VideoDecoderConfig,
 ) -> Result<(CrosVideoDecoderInput, CrosVideoDecoderOutput), Error> {
     let codec_string = config.codec.0;
+    let fmt = codec_to_fmt(&codec_string).map_err(|e| Error::Platform(e))?;
+
+    // Open VA display and validate codec support synchronously (for easier fallback)
+    let va_display = libva::Display::open()
+        .ok_or_else(|| Error::Platform("Could not open VA display".into()))?;
+    let profiles = va_display
+        .query_config_profiles()
+        .map_err(|e| Error::Platform(format!("VA profiles: {e}")))?;
+    let required = format_to_va_profile(fmt);
+    if !profiles.contains(&required) {
+        return Err(Error::Platform(format!(
+            "{fmt:?} not supported by VA driver"
+        )));
+    }
+
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd>();
     let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Result<VideoFrame, Error>>();
     let queue = Arc::new(AtomicU32::new(0));
 
     let queue2 = queue.clone();
-    thread::spawn(move || worker_loop(cmd_rx, frame_tx, queue2, codec_string));
+    thread::spawn(move || worker_loop(cmd_rx, frame_tx, queue2, codec_string, va_display));
 
     Ok((
         CrosVideoDecoderInput { tx: cmd_tx, queue },
         CrosVideoDecoderOutput { rx: frame_rx },
     ))
+}
+
+fn format_to_va_profile(fmt: EncodedFormat) -> libva::VAProfile::Type {
+    use libva::VAProfile;
+    match fmt {
+        EncodedFormat::H264 => VAProfile::VAProfileH264Main,
+        EncodedFormat::H265 => VAProfile::VAProfileHEVCMain,
+        EncodedFormat::VP8 => VAProfile::VAProfileVP8Version0_3,
+        EncodedFormat::VP9 => VAProfile::VAProfileVP9Profile0,
+        EncodedFormat::AV1 => VAProfile::VAProfileAV1Profile0,
+    }
 }
 
 fn make_decoder(
@@ -146,33 +174,34 @@ fn make_decoder(
     }
 }
 
+fn codec_to_fmt(codec: &str) -> Result<EncodedFormat, String> {
+    match codec {
+        "video/avc" | "video/h264" => Ok(EncodedFormat::H264),
+        "video/hevc" | "video/h265" => Ok(EncodedFormat::H265),
+        "video/vp8" => Ok(EncodedFormat::VP8),
+        "video/vp9" => Ok(EncodedFormat::VP9),
+        "video/av01" | "video/av1" => Ok(EncodedFormat::AV1),
+        _ => Err(format!("unsupported codec string: {codec}")),
+    }
+}
+
 fn worker_loop(
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     frame_tx: mpsc::UnboundedSender<Result<VideoFrame, Error>>,
     queue: Arc<AtomicU32>,
     codec_string: String,
+    va_display: Arc<libva::Display>,
 ) {
     let mut frame_queue: Vec<GenericDmaVideoFrame> = Vec::new();
     let mut decoder: Option<DynStatelessVideoDecoder<GenericDmaVideoFrame>> = None;
     let mut have_cache = false;
     let mut cached_w = 0u32;
     let mut cached_h = 0u32;
-    let mut cached_display = Resolution { width: 0, height: 0 };
+    let mut cached_display = Resolution {
+        width: 0,
+        height: 0,
+    };
 
-    fn codec_to_fmt(codec: &str) -> Result<EncodedFormat, String> {
-        match codec {
-            "video/avc" | "video/h264" => Ok(EncodedFormat::H264),
-            "video/hevc" | "video/h265" => Ok(EncodedFormat::H265),
-            "video/vp8" => Ok(EncodedFormat::VP8),
-            "video/vp9" => Ok(EncodedFormat::VP9),
-            "video/av01" | "video/av1" => Ok(EncodedFormat::AV1),
-            _ => Err(format!("unsupported codec string: {codec}")),
-        }
-    }
-
-    let va_display = Arc::new(
-        libva::Display::open().expect("Could not open VA display"),
-    );
     let va_display_clone = va_display.clone();
     let mut alloc_frame = move |stream_info: &StreamInfo| -> GenericDmaVideoFrame {
         create_video_frame(
@@ -199,7 +228,17 @@ fn worker_loop(
                 let res = (|| -> Result<(), Error> {
                     if let Some(dec) = decoder.as_mut() {
                         dec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
-                        let _ = drain_events(dec, &mut frame_queue, &frame_tx, &mut alloc_frame, &va_display, &mut have_cache, &mut cached_w, &mut cached_h, &mut cached_display)?;
+                        let _ = drain_events(
+                            dec,
+                            &mut frame_queue,
+                            &frame_tx,
+                            &mut alloc_frame,
+                            &va_display,
+                            &mut have_cache,
+                            &mut cached_w,
+                            &mut cached_h,
+                            &mut cached_display,
+                        )?;
                     }
                     Ok(())
                 })();
@@ -243,7 +282,17 @@ fn worker_loop(
                             }
                             Err(e) => return Err(Error::Platform(format!("{e:?}"))),
                         }
-                        if drain_events(dec, &mut frame_queue, &frame_tx, &mut alloc_frame, &va_display, &mut have_cache, &mut cached_w, &mut cached_h, &mut cached_display)? {
+                        if drain_events(
+                            dec,
+                            &mut frame_queue,
+                            &frame_tx,
+                            &mut alloc_frame,
+                            &va_display,
+                            &mut have_cache,
+                            &mut cached_w,
+                            &mut cached_h,
+                            &mut cached_display,
+                        )? {
                             break;
                         }
                     }
@@ -299,7 +348,9 @@ fn drain_events<F: CcVideoFrame + 'static>(
                 let frame_arc = handle.video_frame();
                 let out = nv12_frame_to_i420(&*frame_arc, ts)
                     .or_else(|e| {
-                        eprintln!("[VAAPI] nv12_frame_to_i420 failed: {e:?}, trying VA-API fallback");
+                        eprintln!(
+                            "[VAAPI] nv12_frame_to_i420 failed: {e:?}, trying VA-API fallback"
+                        );
                         nv12_frame_to_i420_via_vaapi(&*frame_arc, ts, va_display)
                     })
                     .map_err(|e| {
@@ -310,7 +361,12 @@ fn drain_events<F: CcVideoFrame + 'static>(
                 sent = true;
 
                 if *have_cache {
-                    frame_queue.push(create_video_frame(*cached_w, *cached_h, *cached_display, va_display));
+                    frame_queue.push(create_video_frame(
+                        *cached_w,
+                        *cached_h,
+                        *cached_display,
+                        va_display,
+                    ));
                 }
             }
         }
@@ -335,8 +391,7 @@ fn create_video_frame(
         )
         .expect("VA surface allocation failed");
     let surface = surfaces.into_iter().next().unwrap();
-    let desc = surface.export_prime()
-        .expect("VA surface export failed");
+    let desc = surface.export_prime().expect("VA surface export failed");
     let layer = &desc.layers[0];
     let planes: Vec<_> = (0..layer.num_planes as usize)
         .map(|i| PlaneLayout {
@@ -347,14 +402,17 @@ fn create_video_frame(
         .collect();
     let mut dma_handles = Vec::new();
     for obj in &desc.objects {
-        dma_handles.push(
-            std::fs::File::from(obj.fd.try_clone().expect("FD clone failed")),
-        );
+        dma_handles.push(std::fs::File::from(
+            obj.fd.try_clone().expect("FD clone failed"),
+        ));
     }
     GenericDmaVideoFrame::new(
         dma_handles,
         FrameLayout {
-            format: (Fourcc::from(desc.fourcc), desc.objects[0].drm_format_modifier),
+            format: (
+                Fourcc::from(desc.fourcc),
+                desc.objects[0].drm_format_modifier,
+            ),
             size: display_resolution,
             planes,
         },
@@ -409,8 +467,7 @@ fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(
     let uv_off = va_image.offsets[1] as usize;
     let raw = image.as_ref();
 
-    if y_off + luma_stride * height > raw.len()
-        || uv_off + chroma_stride * (height / 2) > raw.len()
+    if y_off + luma_stride * height > raw.len() || uv_off + chroma_stride * (height / 2) > raw.len()
     {
         return Err(Error::Platform("derived image data too small".into()));
     }
