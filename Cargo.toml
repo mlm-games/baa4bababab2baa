@@ -34,12 +34,12 @@ tokio = { version = "1", features = [
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 wasm-bindgen = "0.2"
-web-sys = { version = "=0.3.102", features = [
+web-sys = { version = "0.3", features = [
     "VideoFrame",
     "VideoFrameBufferInit",
     "VideoPixelFormat",
 ] }
-web-codecs = { version = "0.3" }
+web-codecs = { git = "https://github.com/mlm-games/web-rs.git" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 videotoolbox-rs = { version = "0.1", optional = true }
@@ -50,7 +50,7 @@ videotoolbox-rs = { version = "0.1", optional = true }
 [patch.crates-io]
 # cros-libva = { git = "https://github.com/mlm-games/cros-libva", branch = "main" }
 # cros-codecs = { version = "0.0.10", optional = true, default-features = false, git = "https://github.com/mlm-games/cros-codecs", branch = "main" }
-web-codecs = { git = "https://github.com/mlm-games/web-rs.git", branch = "main" }
+# web-codecs = { git = "https://github.com/mlm-games/web-rs.git" }
 
 # web-codecs = { path = "/home/ymsr/Documents/Repos/web-rs/web-codecs" }
 
