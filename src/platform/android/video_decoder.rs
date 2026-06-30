@@ -83,6 +83,10 @@ pub fn create(
         format.set_i32("height", res.height as i32);
     }
 
+    if let Some(desc) = &config.description {
+        let _ = format.set_buffer("csd-0", desc);
+    }
+
     let mime = config.codec.0.clone();
 
     let mut codec = MediaCodec::create_decoder(&mime)
@@ -139,7 +143,7 @@ fn drain_output(
 }
 
 fn send_eos(codec: &mut MediaCodec) -> Result<(), Error> {
-    loop {
+    for _ in 0..5000 {
         if let Ok(buf) = codec.dequeue_input() {
             let mut buf: mediacodec::CodecInputBuffer = buf;
             buf.set_flags(BufferFlag::EndOfStream as u32);
@@ -147,13 +151,14 @@ fn send_eos(codec: &mut MediaCodec) -> Result<(), Error> {
         }
         thread::sleep(std::time::Duration::from_millis(1));
     }
+    Err(Error::Platform("send_eos timed out waiting for input buffer".into()))
 }
 
 fn drain_until_eos(
     codec: &mut MediaCodec,
     frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
 ) -> Result<(), Error> {
-    loop {
+    for _ in 0..5000 {
         match codec.dequeue_output() {
             Ok(out) => {
                 let out: mediacodec::CodecOutputBuffer = out;
@@ -177,6 +182,7 @@ fn drain_until_eos(
             Err(_) => thread::sleep(std::time::Duration::from_millis(1)),
         }
     }
+    Err(Error::Platform("drain_until_eos timed out waiting for EOS".into()))
 }
 
 fn decode_loop(
