@@ -12,7 +12,7 @@ linux = [
     "cros-codecs/av1",
     "cros-codecs/gbm",
 ]
-apple = []
+apple = ["dep:videotoolbox-rs"]
 
 [dependencies]
 thiserror = "2"
@@ -48,11 +48,4 @@ videotoolbox-rs = { version = "0.1", optional = true }
 videotoolbox-rs = { version = "0.1", optional = true }
 
 [patch.crates-io]
-# cros-libva = { git = "https://github.com/mlm-games/cros-libva", branch = "main" }
-# cros-codecs = { version = "0.0.10", optional = true, default-features = false, git = "https://github.com/mlm-games/cros-codecs", branch = "main" }
-# web-codecs = { git = "https://github.com/mlm-games/web-rs.git" }
-
 # web-codecs = { path = "/home/ymsr/Documents/Repos/web-rs/web-codecs" }
-
-[profile.dev]
-opt-level = 0

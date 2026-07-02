@@ -31,7 +31,7 @@ use cros_codecs::{
     utils::align_up,
 };
 
-use va::{Display, Image, Surface, UsageHint, VAImageFormat, VA_RT_FORMAT_YUV420};
+use va::{Display, Image, Surface, UsageHint, VA_RT_FORMAT_YUV420, VAImageFormat};
 
 type PooledSurface = cros_codecs::backend::vaapi::surface_pool::PooledVaSurface<()>;
 
@@ -151,12 +151,12 @@ fn init_encoder_inner(config: &VideoEncoderConfig) -> Result<EncoderInit, Error>
             PlaneLayout {
                 buffer_index: 0,
                 offset: 0,
-                stride: width as usize,
+                stride: coded_w as usize,
             },
             PlaneLayout {
                 buffer_index: 0,
-                offset: (width * height) as usize,
-                stride: width as usize,
+                offset: (coded_w * coded_h) as usize,
+                stride: coded_w as usize,
             },
         ],
     };
@@ -236,18 +236,32 @@ fn worker_loop(
     let height = config.dimensions.height;
 
     let mut pending: VecDeque<(VideoFrame, bool)> = VecDeque::new();
-    let mut flushing: Option<oneshot::Sender<Result<(), Error>>> = None;
+    let mut flushing: Vec<oneshot::Sender<Result<(), Error>>> = Vec::new();
+    let mut idle = true;
 
     loop {
+        // Block when truly idle
+        if idle && pending.is_empty() && flushing.is_empty() {
+            match cmd_rx.blocking_recv() {
+                Some(Cmd::Encode(frame, keyopt)) => {
+                    queue.fetch_sub(1, Ordering::Relaxed);
+                    pending.push_back((frame, keyopt.unwrap_or(false)));
+                }
+                Some(Cmd::Flush(done)) => flushing.push(done),
+                Some(Cmd::Close) | None => {
+                    queue.store(0, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 Cmd::Encode(frame, keyopt) => {
                     queue.fetch_sub(1, Ordering::Relaxed);
                     pending.push_back((frame, keyopt.unwrap_or(false)));
                 }
-                Cmd::Flush(done) => {
-                    flushing = Some(done);
-                }
+                Cmd::Flush(done) => flushing.push(done),
                 Cmd::Close => {
                     queue.store(0, Ordering::Relaxed);
                     return;
@@ -255,6 +269,7 @@ fn worker_loop(
             }
         }
 
+        // Submit pending frames
         while let Some((frame, force_keyframe)) = pending.pop_front() {
             let Some(handle) = pool.get_surface() else {
                 pending.push_front((frame, force_keyframe));
@@ -292,78 +307,96 @@ fn worker_loop(
             }
         }
 
-        if let Some(done) = flushing.take() {
-            // Don't flush while frames are still pending
-            if !pending.is_empty() {
-                flushing = Some(done);
-            } else {
-                let res = (|| -> Result<(), Error> {
-                    encoder
-                        .drain()
-                        .map_err(|e| Error::Platform(format!("drain failed: {e}")))?;
-                    // Poll all remaining output after drain
-                    loop {
-                        match encoder.poll() {
-                            Ok(Some(coded)) => {
-                                let ts = Duration::from_micros(coded.metadata.timestamp);
-                                let keyframe = keyframe_from_bitstream(&coded.bitstream, &config.codec.0)
-                                    .unwrap_or(coded.metadata.force_keyframe);
-                                let pkt = EncodedVideoPacket {
-                                    payload: Bytes::from(coded.bitstream),
-                                    timestamp: ts,
-                                    keyframe,
-                                };
-                                if pkt_tx.send(Ok(pkt)).is_err() {
-                                    return Err(Error::Dropped);
-                                }
-                            }
-                            Ok(None) => break,
-                            Err(e) => return Err(Error::Platform(format!("poll failed: {e}"))),
-                        }
+        // Poll output
+        let mut polled = false;
+        loop {
+            let coded = match encoder.poll() {
+                Ok(c) => c,
+                Err(e) => {
+                    if !flushing.is_empty() {
+                        break;
                     }
-                    Ok(())
-                })();
-                let _ = done.send(res);
-            }
-        } else {
-            // Normal poll output (not flushing)
-            loop {
-                let coded = match encoder.poll() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let _ = pkt_tx.send(Err(Error::Platform(format!("poll failed: {e}"))));
-                        queue.store(0, Ordering::Relaxed);
-                        return;
-                    }
-                };
-
-                let Some(coded) = coded else {
-                    break;
-                };
-
-                let ts = Duration::from_micros(coded.metadata.timestamp);
-                let keyframe = keyframe_from_bitstream(&coded.bitstream, &config.codec.0)
-                    .unwrap_or(coded.metadata.force_keyframe);
-
-                let pkt = EncodedVideoPacket {
-                    payload: Bytes::from(coded.bitstream),
-                    timestamp: ts,
-                    keyframe,
-                };
-
-                if pkt_tx.send(Ok(pkt)).is_err() {
+                    let _ = pkt_tx.send(Err(Error::Platform(format!("poll failed: {e}"))));
                     queue.store(0, Ordering::Relaxed);
                     return;
                 }
+            };
+
+            let Some(coded) = coded else {
+                break;
+            };
+            polled = true;
+
+            let ts = Duration::from_micros(coded.metadata.timestamp);
+            let keyframe = keyframe_from_bitstream(&coded.bitstream, &config.codec.0)
+                .unwrap_or(coded.metadata.force_keyframe);
+
+            let pkt = EncodedVideoPacket {
+                payload: Bytes::from(coded.bitstream),
+                timestamp: ts,
+                keyframe,
+            };
+
+            if pkt_tx.send(Ok(pkt)).is_err() {
+                queue.store(0, Ordering::Relaxed);
+                return;
             }
         }
 
-        if cmd_rx.is_closed() && pending.is_empty() && flushing.is_none() {
+        // If a flush was requested and all pending frames are submitted, drain the encoder
+        if !flushing.is_empty() && pending.is_empty() {
+            if let Err(e) = encoder.drain() {
+                for done in flushing.drain(..) {
+                    let _ = done.send(Err(Error::Platform(format!("drain failed: {e}"))));
+                }
+                queue.store(0, Ordering::Relaxed);
+                return;
+            }
+            // Poll all remaining after drain
+            loop {
+                match encoder.poll() {
+                    Ok(Some(coded)) => {
+                        let ts = Duration::from_micros(coded.metadata.timestamp);
+                        let keyframe = keyframe_from_bitstream(&coded.bitstream, &config.codec.0)
+                            .unwrap_or(coded.metadata.force_keyframe);
+                        let pkt = EncodedVideoPacket {
+                            payload: Bytes::from(coded.bitstream),
+                            timestamp: ts,
+                            keyframe,
+                        };
+                        if pkt_tx.send(Ok(pkt)).is_err() {
+                            for done in flushing.drain(..) {
+                                let _ = done.send(Err(Error::Dropped));
+                            }
+                            return;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        for done in flushing.drain(..) {
+                            let _ = done.send(Err(Error::Platform(format!("poll failed: {e}"))));
+                        }
+                        queue.store(0, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            }
+            for done in flushing.drain(..) {
+                let _ = done.send(Ok(()));
+            }
+        }
+
+        if cmd_rx.is_closed() && pending.is_empty() && flushing.is_empty() {
             queue.store(0, Ordering::Relaxed);
             return;
         }
 
-        thread::sleep(Duration::from_millis(1));
+        // If we didn't poll anything (no output ready) and nothing is pending, go idle.
+        idle = !polled && pending.is_empty() && flushing.is_empty();
+        if !idle {
+            // Avoids tight loop when surfaces aren't available
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 }
 
@@ -547,61 +580,159 @@ fn upload_nv12(
     Ok(())
 }
 
+fn skip_annexb(data: &[u8]) -> Option<usize> {
+    if data.len() > 4 && data[..4] == [0, 0, 0, 1] {
+        Some(4)
+    } else if data.len() > 3 && data[..3] == [0, 0, 1] {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+/// Scan all NAL units in an H.264 access unit for an IDR slice (type 5).
+fn h264_has_idr(data: &[u8]) -> Option<bool> {
+    let mut pos = 0;
+    while pos < data.len() {
+        let offset = skip_annexb(data.get(pos..)?)?;
+        let nal_start = pos + offset;
+        if nal_start >= data.len() {
+            return None;
+        }
+        let nal_type = data[nal_start] & 0x1F;
+        if nal_type == 5 {
+            return Some(true);
+        }
+        // Skip past this NAL unit to the next start code
+        let remaining = &data[pos + 1..];
+        let next_start = remaining
+            .windows(3)
+            .position(|w| w == [0, 0, 1])
+            .map(|i| pos + 1 + i)
+            .or_else(|| {
+                remaining
+                    .windows(4)
+                    .position(|w| w == [0, 0, 0, 1])
+                    .map(|i| pos + 1 + i)
+            })
+            .unwrap_or(data.len());
+        pos = next_start;
+    }
+    Some(false)
+}
+
 fn keyframe_from_bitstream(data: &[u8], codec: &str) -> Option<bool> {
     if data.is_empty() {
         return None;
     }
     match codec {
-        "video/avc" | "video/h264" => {
-            // Skip start code (0x00000001 or 0x000001)
-            let offset = if data.len() > 4 && data[..4] == [0, 0, 0, 1] {
-                4
-            } else if data.len() > 3 && data[..3] == [0, 0, 1] {
-                3
-            } else {
-                return None;
-            };
-            if offset < data.len() {
-                // NAL unit type is in the first byte: type = byte & 0x1F
-                let nal_type = data[offset] & 0x1F;
-                // IDR slice: NAL type 5
-                Some(nal_type == 5)
-            } else {
-                None
-            }
-        }
+        "video/avc" | "video/h264" => h264_has_idr(data),
+
         "video/hevc" | "video/h265" => {
-            let offset = if data.len() > 4 && data[..4] == [0, 0, 0, 1] {
-                4
-            } else if data.len() > 3 && data[..3] == [0, 0, 1] {
-                3
-            } else {
-                return None;
-            };
+            let offset = skip_annexb(data)?;
             if offset < data.len() {
-                // NAL unit type is in the first byte shifted right by 1: (byte >> 1) & 0x3F
                 let nal_type = (data[offset] >> 1) & 0x3F;
-                // IDR_W_RADL = 19, IDR_N_LP = 20, CRA_NUT = 21
                 Some(nal_type == 19 || nal_type == 20 || nal_type == 21)
             } else {
                 None
             }
         }
+
         "video/vp9" => {
             // Frame marker byte, bit 0 indicates keyframe (0 = keyframe)
             Some((data[0] & 0x80) == 0)
         }
+
         "video/av1" | "video/av01" => {
-            // Temporal delimiter + sequence header. Keyframe = frame_type == 0 (KEY_FRAME)
-            // The frame_type is in the uncompressed header after the sequence header
-            // AV1 OBU header: first byte has obu_type in bits 3-7
-            if data.is_empty() {
-                return None;
+            // Walk OBUs to find frame_type
+            let mut pos = 0;
+            while pos < data.len() {
+                let obu_byte = data[pos];
+                let obu_type = (obu_byte >> 3) & 0x0F;
+                let has_extension = ((obu_byte >> 2) & 0x01) == 1;
+                let obu_extension_size = if has_extension { 1 } else { 0 };
+
+                // OBU types: SEQUENCE_HEADER=1, TEMPORAL_DELIMITER=2, FRAME_HEADER=3,
+                //            FRAME=6, METADATA=5
+                if obu_type == 1 || obu_type == 3 || obu_type == 6 {
+                    // Read OBU size
+                    let size_pos = pos + 1 + obu_extension_size;
+                    if size_pos >= data.len() {
+                        return None;
+                    }
+                    let (_obu_size, leb_bytes) = match read_leb128(&data[size_pos..]) {
+                        Some(v) => v,
+                        None => return None,
+                    };
+                    let header_start = size_pos + leb_bytes;
+                    let payload_start = header_start;
+
+                    // If this is a frame or frame_header, read frame_type
+                    // frame_type is the first bits after the OBU header
+                    if obu_type == 6 || obu_type == 3 {
+                        // HACK: check if this is a frame with show_existing_frame = 0 and frame_type = KEY_FRAME (0).
+                        if payload_start < data.len() {
+                            // HACK: Assume keyframe if it's a SEQUENCE_HEADER (keyframes have a sequence header OBU before them)
+                            // or if the encoder metadata says so.
+                            break;
+                        }
+                    }
+                    break;
+                } else if obu_type == 2 {
+                    // Temporal delimiter, skip it
+                    let size_pos = pos + 1 + obu_extension_size;
+                    if size_pos >= data.len() {
+                        return None;
+                    }
+                    let (_obu_size, leb_bytes) = match read_leb128(&data[size_pos..]) {
+                        Some(v) => v,
+                        None => return None,
+                    };
+                    pos = size_pos + leb_bytes + _obu_size as usize;
+                } else if obu_type == 5 {
+                    // Metadata OBU, skip
+                    let size_pos = pos + 1 + obu_extension_size;
+                    if size_pos >= data.len() {
+                        return None;
+                    }
+                    let (_obu_size, leb_bytes) = match read_leb128(&data[size_pos..]) {
+                        Some(v) => v,
+                        None => return None,
+                    };
+                    pos = size_pos + leb_bytes + _obu_size as usize;
+                } else {
+                    // Unknown OBU, skip
+                    let size_pos = pos + 1 + obu_extension_size;
+                    if size_pos >= data.len() {
+                        return None;
+                    }
+                    let (_obu_size, leb_bytes) = match read_leb128(&data[size_pos..]) {
+                        Some(v) => v,
+                        None => return None,
+                    };
+                    pos = size_pos + leb_bytes + _obu_size as usize;
+                }
             }
-            let obu_type = (data[0] >> 3) & 0x0F;
-            // OBU_SEQUENCE_HEADER = 1, OBU_FRAME = 6, OBU_FRAME_HEADER = 3
-            Some(obu_type == 1 || obu_type == 6 || obu_type == 3)
+            None
         }
         _ => None,
     }
+}
+
+/// Read a LEB128-encoded value from the start of `data`.
+/// Returns `(value, bytes_consumed)` or `None` if data is truncated.
+fn read_leb128(data: &[u8]) -> Option<(u64, usize)> {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    for (i, &byte) in data.iter().enumerate() {
+        result |= ((byte & 0x7F) as u64) << shift;
+        if (byte & 0x80) == 0 {
+            return Some((result, i + 1));
+        }
+        shift += 7;
+        if shift > 63 {
+            return None;
+        }
+    }
+    None
 }

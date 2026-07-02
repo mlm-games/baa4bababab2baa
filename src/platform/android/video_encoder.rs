@@ -1,5 +1,6 @@
 use std::sync::{
     Arc,
+    OnceLock,
     atomic::{AtomicU32, Ordering},
 };
 use std::thread;
@@ -31,6 +32,7 @@ impl Drop for AndroidVideoEncoderInput {
 pub struct AndroidVideoEncoderOutput {
     rx: mpsc::UnboundedReceiver<Result<EncodedVideoPacket, Error>>,
     decoder_cfg: Option<VideoDecoderConfig>,
+    decoder_cfg_shared: Arc<OnceLock<VideoDecoderConfig>>,
 }
 
 impl VideoEncoderInput for AndroidVideoEncoderInput {
@@ -63,7 +65,9 @@ impl VideoEncoderOutput for AndroidVideoEncoderOutput {
     }
 
     fn decoder_config(&self) -> Option<&VideoDecoderConfig> {
-        self.decoder_cfg.as_ref()
+        self.decoder_cfg.as_ref().or_else(|| {
+            self.decoder_cfg_shared.get()
+        })
     }
 }
 
@@ -96,16 +100,15 @@ pub fn create(
         .start()
         .map_err(|e| Error::Platform(format!("{e:?}")))?;
 
-    // Poll for initial codec config (SPS/PPS) before starting worker
-    let decoder_cfg = poll_encoder_config(&mut codec, &config)?;
-
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd<(VideoFrame, Option<bool>)>>();
     let (pkt_tx, pkt_rx) = mpsc::unbounded_channel::<Result<EncodedVideoPacket, Error>>();
     let queue = Arc::new(AtomicU32::new(0));
     let queue2 = queue.clone();
+    let decoder_cfg = Arc::new(OnceLock::new());
+    let decoder_cfg2 = decoder_cfg.clone();
 
     thread::spawn(move || {
-        encode_loop(codec, cmd_rx, pkt_tx, queue2);
+        encode_loop(codec, cmd_rx, pkt_tx, queue2, decoder_cfg2, config.dimensions, config.codec.clone());
     });
 
     Ok((
@@ -116,36 +119,10 @@ pub fn create(
         },
         AndroidVideoEncoderOutput {
             rx: pkt_rx,
-            decoder_cfg,
+            decoder_cfg: None,
+            decoder_cfg_shared: decoder_cfg,
         },
     ))
-}
-
-fn poll_encoder_config(
-    codec: &mut MediaCodec,
-    config: &VideoEncoderConfig,
-) -> Result<Option<VideoDecoderConfig>, Error> {
-    for _ in 0..500 {
-        match codec.dequeue_output(1000) {
-            Ok(out) => {
-                let out_buf: mediacodec::CodecOutputBuffer = out;
-                let info = out_buf.info();
-                if BufferFlag::CodecConfig.is_contained_in(info.flags as i32) {
-                    if let Some(slice) = out_buf.buffer_slice() {
-                        let data = slice.to_vec();
-                        return Ok(Some(VideoDecoderConfig {
-                            codec: config.codec.clone(),
-                            resolution: Some(Dimensions::new(config.dimensions.width, config.dimensions.height)),
-                            description: Some(bytes::Bytes::from(data)),
-                            hardware_acceleration: None,
-                        }));
-                    }
-                }
-            }
-            Err(_) => thread::sleep(std::time::Duration::from_millis(1)),
-        }
-    }
-    Ok(None)
 }
 
 fn drain_pending_frames(
@@ -189,6 +166,9 @@ fn drain_pending_frames(
 fn drain_encoded_output(
     codec: &mut MediaCodec,
     pkt_tx: &mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
+    decoder_cfg: &Arc<OnceLock<VideoDecoderConfig>>,
+    dimensions: Dimensions,
+    codec_id: crate::types::VideoCodecId,
 ) -> Result<(), Error> {
     while let Ok(out) = codec.dequeue_output(0) {
         let out_buf: mediacodec::CodecOutputBuffer = out;
@@ -201,6 +181,17 @@ fn drain_encoded_output(
             continue;
         }
         if BufferFlag::CodecConfig.is_contained_in(flags) {
+            if decoder_cfg.get().is_none() {
+                if let Some(slice) = out_buf.buffer_slice() {
+                    let data = slice.to_vec();
+                    let _ = decoder_cfg.set(VideoDecoderConfig {
+                        codec: codec_id.clone(),
+                        resolution: Some(Dimensions::new(dimensions.width, dimensions.height)),
+                        description: Some(bytes::Bytes::from(data)),
+                        hardware_acceleration: None,
+                    });
+                }
+            }
             continue;
         }
 
@@ -228,6 +219,9 @@ fn encode_loop(
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd<(VideoFrame, Option<bool>)>>,
     pkt_tx: mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
     queue: Arc<AtomicU32>,
+    decoder_cfg: Arc<OnceLock<VideoDecoderConfig>>,
+    dimensions: Dimensions,
+    codec_id: crate::types::VideoCodecId,
 ) {
     let mut pending: VecDeque<(VideoFrame, Option<bool>)> = VecDeque::new();
 
@@ -263,17 +257,17 @@ fn encode_loop(
                 let _ = done.send(res);
             }
             Some(Cmd::Close) | None => {
-                let _ = drain_encoded_output(&mut codec, &pkt_tx);
+                let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
                 queue.store(0, Ordering::Relaxed);
                 return;
             }
         }
 
         let _ = drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx);
-        let _ = drain_encoded_output(&mut codec, &pkt_tx);
+        let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
 
         if cmd_rx.is_closed() && pending.is_empty() {
-            let _ = drain_encoded_output(&mut codec, &pkt_tx);
+            let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
             queue.store(0, Ordering::Relaxed);
             return;
         }

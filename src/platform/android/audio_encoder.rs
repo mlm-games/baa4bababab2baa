@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::thread;
 
 use mediacodec::{BufferFlag, MediaCodec, MediaFormat};
@@ -101,31 +102,34 @@ pub fn create(
     ))
 }
 
-fn submit_one(
+fn drain_pending_inputs(
     codec: &mut MediaCodec,
-    frame: &AudioFrame,
+    pending: &mut VecDeque<AudioFrame>,
     queue: &std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) -> Result<(), Error> {
-    if let Ok(buf) = codec.dequeue_input(0) {
-        let mut buf: mediacodec::CodecInputBuffer = buf;
-        let (ptr, cap): (*mut u8, usize) = buf.buffer();
-        if frame.samples.len() > cap {
-            return Err(Error::Platform(format!(
-                "audio frame too large: {} > {}",
-                frame.samples.len(),
-                cap
-            )));
+    while let Some(frame) = pending.pop_front() {
+        if let Ok(buf) = codec.dequeue_input(0) {
+            let mut buf: mediacodec::CodecInputBuffer = buf;
+            let (ptr, cap): (*mut u8, usize) = buf.buffer();
+            if frame.samples.len() > cap {
+                return Err(Error::Platform(format!(
+                    "audio frame too large: {} > {}",
+                    frame.samples.len(),
+                    cap
+                )));
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(frame.samples.as_ptr(), ptr, frame.samples.len());
+            }
+            buf.set_write_size(frame.samples.len());
+            buf.set_time(frame.timestamp.as_micros() as u64);
+            queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            pending.push_front(frame);
+            break;
         }
-        unsafe {
-            std::ptr::copy_nonoverlapping(frame.samples.as_ptr(), ptr, frame.samples.len());
-        }
-        buf.set_write_size(frame.samples.len());
-        buf.set_time(frame.timestamp.as_micros() as u64);
-        queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    } else {
-        Err(Error::Platform("no input buffer available".into()))
     }
+    Ok(())
 }
 
 fn drain_encoded_output(
@@ -166,16 +170,14 @@ fn audio_encode_loop(
     pkt_tx: mpsc::UnboundedSender<Result<EncodedAudioPacket, Error>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) {
+    let mut pending: VecDeque<AudioFrame> = VecDeque::new();
+
     loop {
         match cmd_rx.blocking_recv() {
-            Some(Cmd::Item(frame)) => {
-                if let Err(e) = submit_one(&mut codec, &frame, &queue) {
-                    let _ = pkt_tx.send(Err(e));
-                    return;
-                }
-            }
+            Some(Cmd::Item(frame)) => pending.push_back(frame),
             Some(Cmd::Flush(done)) => {
                 let res = (|| -> Result<(), Error> {
+                    drain_pending_inputs(&mut codec, &mut pending, &queue)?;
                     cmd::send_eos(&mut codec)?;
                     cmd::drain_until_eos(&mut codec, |out| {
                         let ts = std::time::Duration::from_micros(out.info().presentation_time_us as u64);
@@ -184,11 +186,11 @@ fn audio_encode_loop(
                         } else {
                             bytes::Bytes::new()
                         };
-                        let pkt = EncodedAudioPacket {
-                            payload,
-                            timestamp: ts,
-                            keyframe: false,
-                        };
+        let pkt = EncodedAudioPacket {
+            payload: payload_bytes,
+            timestamp: ts,
+            keyframe: true,
+        };
                         pkt_tx.send(Ok(pkt)).map_err(|_| Error::Dropped)
                     })?;
                     codec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
@@ -202,6 +204,12 @@ fn audio_encode_loop(
             }
         }
 
+        let _ = drain_pending_inputs(&mut codec, &mut pending, &queue);
         drain_encoded_output(&mut codec, &pkt_tx);
+
+        if cmd_rx.is_closed() && pending.is_empty() {
+            queue.store(0, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
     }
 }

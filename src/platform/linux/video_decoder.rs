@@ -275,6 +275,8 @@ fn worker_loop(
                                 if no_progress_count > 50 {
                                     return Err(Error::Platform("no decode progress".into()));
                                 }
+                                // Back off to avoid tight spin
+                                thread::sleep(std::time::Duration::from_micros(100));
                             }
                             Err(e) => return Err(Error::Platform(format!("{e:?}"))),
                         }
@@ -467,7 +469,8 @@ fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(
     let uv_off = va_image.offsets[1] as usize;
     let raw = image.as_ref();
 
-    if y_off + luma_stride * height > raw.len() || uv_off + chroma_stride * (height / 2) > raw.len()
+    let chroma_height = align_up(height as u32, 2) as usize / 2;
+    if y_off + luma_stride * height > raw.len() || uv_off + chroma_stride * chroma_height > raw.len()
     {
         return Err(Error::Platform("derived image data too small".into()));
     }

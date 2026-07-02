@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::thread;
 
 use mediacodec::{
@@ -91,31 +92,34 @@ pub fn create(
     ))
 }
 
-fn submit_one(
+fn drain_pending_inputs(
     codec: &mut MediaCodec,
-    pkt: &EncodedAudioPacket,
+    pending: &mut VecDeque<EncodedAudioPacket>,
     queue: &std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) -> Result<(), Error> {
-    if let Ok(buf) = codec.dequeue_input(0) {
-        let mut buf: CodecInputBuffer = buf;
-        let (ptr, cap) = buf.buffer();
-        if pkt.payload.len() > cap {
-            return Err(Error::Platform(format!(
-                "audio packet too large: {} > {}",
-                pkt.payload.len(),
-                cap
-            )));
+    while let Some(pkt) = pending.pop_front() {
+        if let Ok(buf) = codec.dequeue_input(0) {
+            let mut buf: CodecInputBuffer = buf;
+            let (ptr, cap) = buf.buffer();
+            if pkt.payload.len() > cap {
+                return Err(Error::Platform(format!(
+                    "audio packet too large: {} > {}",
+                    pkt.payload.len(),
+                    cap
+                )));
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(pkt.payload.as_ptr(), ptr, pkt.payload.len());
+            }
+            buf.set_write_size(pkt.payload.len());
+            buf.set_time(pkt.timestamp.as_micros() as u64);
+            queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            pending.push_front(pkt);
+            break;
         }
-        unsafe {
-            std::ptr::copy_nonoverlapping(pkt.payload.as_ptr(), ptr, pkt.payload.len());
-        }
-        buf.set_write_size(pkt.payload.len());
-        buf.set_time(pkt.timestamp.as_micros() as u64);
-        queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    } else {
-        Err(Error::Platform("no input buffer available".into()))
     }
+    Ok(())
 }
 
 fn drain_output(
@@ -170,19 +174,14 @@ fn audio_decode_loop(
     fallback_channels: u32,
     fallback_sample_rate: u32,
 ) {
+    let mut pending: VecDeque<EncodedAudioPacket> = VecDeque::new();
+
     loop {
         match cmd_rx.blocking_recv() {
-            Some(Cmd::Item(pkt)) => {
-                match submit_one(&mut codec, &pkt, &queue) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        let _ = frame_tx.send(Err(e));
-                        return;
-                    }
-                }
-            }
+            Some(Cmd::Item(pkt)) => pending.push_back(pkt),
             Some(Cmd::Flush(done)) => {
                 let res = (|| -> Result<(), Error> {
+                    drain_pending_inputs(&mut codec, &mut pending, &queue)?;
                     cmd::send_eos(&mut codec)?;
                     cmd::drain_until_eos(&mut codec, |out_buf| {
                         let fmt = out_buf.format();
@@ -225,7 +224,13 @@ fn audio_decode_loop(
             }
         }
 
+        let _ = drain_pending_inputs(&mut codec, &mut pending, &queue);
         drain_output(&mut codec, &frame_tx, fallback_channels, fallback_sample_rate);
+
+        if cmd_rx.is_closed() && pending.is_empty() {
+            queue.store(0, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
     }
 }
 
