@@ -120,13 +120,12 @@ impl VideoDecoderOutput for WasmVideoDecoderOutput {
     }
 
     fn try_frame(&mut self) -> Result<Option<VideoFrame>, Error> {
-        self.inner
-            .try_recv()
-            .map(|opt| opt.map(to_our_frame))
-            .map_err(|e| match e {
-                web_codecs::Error::Dropped => Error::Dropped,
-                other => Error::Platform(format!("{other:?}")),
-            })
+        // Pixel data from web_codecs::VideoFrame can only be obtained
+        // asynchronously (via copy_to_cpu). Use try_frame_raw() to get
+        // the raw web_codecs::VideoFrame, then call copy_to_cpu() on it.
+        Err(Error::InvalidConfig(
+            "try_frame() is not supported on wasm; use try_frame_raw() instead".into(),
+        ))
     }
 }
 
@@ -141,22 +140,10 @@ impl WasmVideoDecoderOutput {
     }
 }
 
-/// Map a MIME-type codec identifier to WebCodecs full codec strings.
-fn mime_to_codec_strings(mime: &str) -> Vec<&str> {
-    match mime {
-        "video/avc" => vec!["avc1.42001E", "avc1.4D001E", "avc1.64001E"],
-        "video/hevc" => vec!["hvc1.1.6.L93.B0", "hev1.1.6.L93.B0"],
-        "video/av01" => vec!["av01.0.04M.08"],
-        "video/vp9" => vec!["vp09.00.10.08"],
-        "video/vp8" => vec!["vp8"],
-        _ => vec![mime],
-    }
-}
-
 pub fn create(
     config: VideoDecoderConfig,
 ) -> Result<(WasmVideoDecoderInput, WasmVideoDecoderOutput), Error> {
-    let candidates = mime_to_codec_strings(&config.codec.0);
+    let candidates = super::mime_to_codec_strings(&config.codec.0);
     let mut last_err = None;
 
     for codec_str in candidates {

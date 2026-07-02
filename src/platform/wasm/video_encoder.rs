@@ -13,8 +13,14 @@ use crate::{
 };
 
 pub(super) fn to_wc_config(cfg: &VideoEncoderConfig) -> WcVideoEncoderConfig {
+    let codec = super::mime_to_codec_strings(&cfg.codec.0)
+        .into_iter()
+        .next()
+        .unwrap_or(&cfg.codec.0)
+        .to_string();
+
     let mut wc = WcVideoEncoderConfig::new(
-        &cfg.codec.0,
+        &codec,
         WcDimensions::new(cfg.dimensions.width, cfg.dimensions.height),
     );
 
@@ -94,6 +100,8 @@ fn build_wasm_frame(
         PixelFormat::Bgra8 => VideoPixelFormat::Bgra,
     };
 
+    // (height, width): web-sys VideoFrameBufferInit dictionary constructor
+    // args follow alphabetical order: codedHeight before codedWidth.
     let init = VideoFrameBufferInit::new_with_f64(
         dims.height,
         dims.width,

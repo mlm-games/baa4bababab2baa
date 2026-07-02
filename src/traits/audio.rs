@@ -4,6 +4,8 @@ use crate::error::Error;
 use crate::traits::video::MaybeSend;
 use crate::types::{AudioDecoderConfig, AudioEncoderConfig, AudioFrame, EncodedAudioPacket};
 
+/// See [`crate::traits::video::VideoEncoderInput::queue_size`] for
+/// semantics of the `queue_size` method.
 pub trait AudioEncoderInput: MaybeSend {
     fn encode(&mut self, frame: AudioFrame) -> Result<(), Error>;
     fn flush(&mut self) -> impl Future<Output = Result<(), Error>> + MaybeSend;

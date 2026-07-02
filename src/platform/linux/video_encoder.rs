@@ -580,13 +580,20 @@ fn upload_nv12(
     Ok(())
 }
 
-fn skip_annexb(data: &[u8]) -> Option<usize> {
-    if data.len() > 4 && data[..4] == [0, 0, 0, 1] {
-        Some(4)
-    } else if data.len() > 3 && data[..3] == [0, 0, 1] {
-        Some(3)
-    } else {
-        None
+fn keyframe_from_bitstream(data: &[u8], codec: &str) -> Option<bool> {
+    if data.is_empty() {
+        return None;
+    }
+    match codec {
+        "video/avc" | "video/h264" => h264_has_idr(data),
+
+        "video/hevc" | "video/h265" => h265_is_idr(data),
+
+        "video/vp9" => vp9_is_keyframe(data),
+
+        "video/av1" | "video/av01" => av1_is_keyframe(data),
+
+        _ => None,
     }
 }
 
@@ -603,7 +610,6 @@ fn h264_has_idr(data: &[u8]) -> Option<bool> {
         if nal_type == 5 {
             return Some(true);
         }
-        // Skip past this NAL unit to the next start code
         let remaining = &data[pos + 1..];
         let next_start = remaining
             .windows(3)
@@ -621,118 +627,65 @@ fn h264_has_idr(data: &[u8]) -> Option<bool> {
     Some(false)
 }
 
-fn keyframe_from_bitstream(data: &[u8], codec: &str) -> Option<bool> {
-    if data.is_empty() {
-        return None;
-    }
-    match codec {
-        "video/avc" | "video/h264" => h264_has_idr(data),
-
-        "video/hevc" | "video/h265" => {
-            let offset = skip_annexb(data)?;
-            if offset < data.len() {
-                let nal_type = (data[offset] >> 1) & 0x3F;
-                Some(nal_type == 19 || nal_type == 20 || nal_type == 21)
-            } else {
-                None
-            }
-        }
-
-        "video/vp9" => {
-            // Frame marker byte, bit 0 indicates keyframe (0 = keyframe)
-            Some((data[0] & 0x80) == 0)
-        }
-
-        "video/av1" | "video/av01" => {
-            // Walk OBUs to find frame_type
-            let mut pos = 0;
-            while pos < data.len() {
-                let obu_byte = data[pos];
-                let obu_type = (obu_byte >> 3) & 0x0F;
-                let has_extension = ((obu_byte >> 2) & 0x01) == 1;
-                let obu_extension_size = if has_extension { 1 } else { 0 };
-
-                // OBU types: SEQUENCE_HEADER=1, TEMPORAL_DELIMITER=2, FRAME_HEADER=3,
-                //            FRAME=6, METADATA=5
-                if obu_type == 1 || obu_type == 3 || obu_type == 6 {
-                    // Read OBU size
-                    let size_pos = pos + 1 + obu_extension_size;
-                    if size_pos >= data.len() {
-                        return None;
-                    }
-                    let (_obu_size, leb_bytes) = match read_leb128(&data[size_pos..]) {
-                        Some(v) => v,
-                        None => return None,
-                    };
-                    let header_start = size_pos + leb_bytes;
-                    let payload_start = header_start;
-
-                    // If this is a frame or frame_header, read frame_type
-                    // frame_type is the first bits after the OBU header
-                    if obu_type == 6 || obu_type == 3 {
-                        // HACK: check if this is a frame with show_existing_frame = 0 and frame_type = KEY_FRAME (0).
-                        if payload_start < data.len() {
-                            // HACK: Assume keyframe if it's a SEQUENCE_HEADER (keyframes have a sequence header OBU before them)
-                            // or if the encoder metadata says so.
-                            break;
-                        }
-                    }
-                    break;
-                } else if obu_type == 2 {
-                    // Temporal delimiter, skip it
-                    let size_pos = pos + 1 + obu_extension_size;
-                    if size_pos >= data.len() {
-                        return None;
-                    }
-                    let (_obu_size, leb_bytes) = match read_leb128(&data[size_pos..]) {
-                        Some(v) => v,
-                        None => return None,
-                    };
-                    pos = size_pos + leb_bytes + _obu_size as usize;
-                } else if obu_type == 5 {
-                    // Metadata OBU, skip
-                    let size_pos = pos + 1 + obu_extension_size;
-                    if size_pos >= data.len() {
-                        return None;
-                    }
-                    let (_obu_size, leb_bytes) = match read_leb128(&data[size_pos..]) {
-                        Some(v) => v,
-                        None => return None,
-                    };
-                    pos = size_pos + leb_bytes + _obu_size as usize;
-                } else {
-                    // Unknown OBU, skip
-                    let size_pos = pos + 1 + obu_extension_size;
-                    if size_pos >= data.len() {
-                        return None;
-                    }
-                    let (_obu_size, leb_bytes) = match read_leb128(&data[size_pos..]) {
-                        Some(v) => v,
-                        None => return None,
-                    };
-                    pos = size_pos + leb_bytes + _obu_size as usize;
-                }
-            }
-            None
-        }
-        _ => None,
+fn skip_annexb(data: &[u8]) -> Option<usize> {
+    if data.len() > 4 && data[..4] == [0, 0, 0, 1] {
+        Some(4)
+    } else if data.len() > 3 && data[..3] == [0, 0, 1] {
+        Some(3)
+    } else {
+        None
     }
 }
 
-/// Read a LEB128-encoded value from the start of `data`.
-/// Returns `(value, bytes_consumed)` or `None` if data is truncated.
-fn read_leb128(data: &[u8]) -> Option<(u64, usize)> {
-    let mut result: u64 = 0;
-    let mut shift = 0;
-    for (i, &byte) in data.iter().enumerate() {
-        result |= ((byte & 0x7F) as u64) << shift;
-        if (byte & 0x80) == 0 {
-            return Some((result, i + 1));
-        }
-        shift += 7;
-        if shift > 63 {
-            return None;
-        }
+fn h265_is_idr(data: &[u8]) -> Option<bool> {
+    let offset = skip_annexb(data)?;
+    if offset < data.len() {
+        let nal_type = (data[offset] >> 1) & 0x3F;
+        Some(nal_type == 19 || nal_type == 20 || nal_type == 21)
+    } else {
+        None
     }
-    None
+}
+
+fn vp9_is_keyframe(data: &[u8]) -> Option<bool> {
+    use cros_codecs::codec::vp9::parser::{FrameType, Parser};
+    let mut parser = Parser::default();
+    match parser.parse_frame(data, 0, data.len()) {
+        Ok(frame) => Some(frame.header.frame_type == FrameType::KeyFrame),
+        Err(_) => None,
+    }
+}
+
+fn av1_is_keyframe(data: &[u8]) -> Option<bool> {
+    use cros_codecs::codec::av1::parser::{FrameType, ObuType, Parser};
+    let mut parser = Parser::default();
+    loop {
+        let action = match parser.read_obu(data) {
+            Ok(a) => a,
+            Err(_) => return None,
+        };
+        match action {
+            cros_codecs::codec::av1::parser::ObuAction::Process(obu) => {
+                match obu.header.obu_type {
+                    ObuType::FrameHeader | ObuType::Frame | ObuType::RedundantFrameHeader => {
+                        match parser.parse_frame_header_obu(&obu) {
+                            Ok(fh) => return Some(fh.frame_type == FrameType::KeyFrame),
+                            Err(_) => return None,
+                        }
+                    }
+                    ObuType::SequenceHeader => {
+                        // Parser internally stores sequence header; continue
+                    }
+                    ObuType::TemporalDelimiter | ObuType::TileGroup | ObuType::Metadata => {
+                        // Skip these OBU types
+                    }
+                    _ => {} // Reserved, Padding etc
+                }
+            }
+            cros_codecs::codec::av1::parser::ObuAction::Drop(_consumed) => {
+                // OBU was dropped by parser (e.g. not in operating point) — continue
+            }
+        }
+        // If we've exhausted the data, parser.read_obu returns Err on next call
+    }
 }

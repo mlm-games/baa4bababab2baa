@@ -109,6 +109,133 @@ pub fn create(
     ))
 }
 
+/// Extract a [`VideoFrame`] from a MediaCodec output buffer, accounting for
+/// stride, slice-height, crop rectangle, and color format.
+fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame, Error> {
+    let fmt = out_buf.format();
+    let raw = out_buf.buffer_slice().unwrap_or_default();
+    let ts_us = out_buf.info().presentation_time_us;
+
+    // Read the actual display size (crop rect overrides width/height for visible region)
+    let crop_left = fmt.get_i32("crop-left").unwrap_or(0) as u32;
+    let crop_top = fmt.get_i32("crop-top").unwrap_or(0) as u32;
+    let crop_right = fmt.get_i32("crop-right").unwrap_or(0) as u32;
+    let crop_bottom = fmt.get_i32("crop-bottom").unwrap_or(0) as u32;
+    let fmt_w = fmt.get_i32("width").unwrap_or(0) as u32;
+    let fmt_h = fmt.get_i32("height").unwrap_or(0) as u32;
+
+    // Crop rect is preferred; fall back to width/height
+    let (vis_w, vis_h) = if crop_right > 0 && crop_bottom > 0 {
+        (crop_right - crop_left + 1, crop_bottom - crop_top + 1)
+    } else {
+        (fmt_w, fmt_h)
+    };
+
+    // Stride and slice-height may be provided; fall back to width/height
+    let stride = fmt.get_i32("stride").unwrap_or(fmt_w as i32) as usize;
+    let slice_h = fmt.get_i32("slice-height").unwrap_or(fmt_h as i32) as usize;
+
+    let color_format = fmt.get_i32("color-format").unwrap_or(21) as u32;
+
+    let w = vis_w as usize;
+    let h = vis_h as usize;
+
+    match color_format {
+        21 | 2141391876 | 2141391878 | 2130708361 => {
+            // COLOR_FormatYUV420SemiPlanar (NV12) or compatible vendor formats
+            let y_size = stride * slice_h;
+            let uv_size = stride * (slice_h / 2);
+            let expected = y_size + uv_size;
+            if raw.len() < expected {
+                return Err(Error::Platform(format!(
+                    "NV12 buffer too small: {} < {}",
+                    raw.len(),
+                    expected
+                )));
+            }
+            // Repack: copy visible rows from stride-pitched buffers into tight rows
+            let mut out = vec![0u8; w * h * 3 / 2];
+            let (out_y, out_uv) = out.split_at_mut(w * h);
+            // Y plane
+            for row in 0..h {
+                let src_start = (crop_top as usize + row) * stride;
+                let dst_start = row * w;
+                out_y[dst_start..dst_start + w]
+                    .copy_from_slice(&raw[src_start..src_start + w]);
+            }
+            // UV plane (interleaved)
+            let uv_h = h / 2;
+            let uv_crop_top = crop_top as usize / 2;
+            for row in 0..uv_h {
+                let src_start = y_size + (uv_crop_top + row) * stride;
+                let dst_start = row * w;
+                out_uv[dst_start..dst_start + w]
+                    .copy_from_slice(&raw[src_start..src_start + w]);
+            }
+            Ok(VideoFrame {
+                dimensions: Dimensions::new(vis_w, vis_h),
+                format: PixelFormat::Nv12,
+                timestamp: std::time::Duration::from_micros(ts_us as u64),
+                planes: VideoPlanes::Cpu(out),
+            })
+        }
+        19 | 2141391872 | 2130706688 => {
+            // COLOR_FormatYUV420Planar (I420) or compatible vendor formats
+            let y_size = stride * slice_h;
+            let u_size = stride / 2 * (slice_h / 2);
+            let v_size = u_size;
+            let expected = y_size + u_size + v_size;
+            if raw.len() < expected {
+                return Err(Error::Platform(format!(
+                    "I420 buffer too small: {} < {}",
+                    raw.len(),
+                    expected
+                )));
+            }
+            let mut out = vec![0u8; w * h * 3 / 2];
+            let (out_y, out_uv) = out.split_at_mut(w * h);
+            let (out_u, out_v) = out_uv.split_at_mut(w * h / 4);
+            // Y plane
+            for row in 0..h {
+                let src_start = (crop_top as usize + row) * stride;
+                let dst_start = row * w;
+                out_y[dst_start..dst_start + w]
+                    .copy_from_slice(&raw[src_start..src_start + w]);
+            }
+            // U plane
+            let uv_stride = stride / 2;
+            let uv_h = h / 2;
+            for row in 0..uv_h {
+                let src_start = y_size + (uv_crop_top(row)) * uv_stride;
+                let dst_start = row * (w / 2);
+                out_u[dst_start..dst_start + w / 2]
+                    .copy_from_slice(&raw[src_start..src_start + w / 2]);
+            }
+            // V plane
+            for row in 0..uv_h {
+                let src_start = y_size + u_size + (uv_crop_top(row)) * uv_stride;
+                let dst_start = row * (w / 2);
+                out_v[dst_start..dst_start + w / 2]
+                    .copy_from_slice(&raw[src_start..src_start + w / 2]);
+            }
+            Ok(VideoFrame {
+                dimensions: Dimensions::new(vis_w, vis_h),
+                format: PixelFormat::Yuv420p,
+                timestamp: std::time::Duration::from_micros(ts_us as u64),
+                planes: VideoPlanes::Cpu(out),
+            })
+        }
+        other => Err(Error::Platform(format!(
+            "unsupported MediaCodec color-format: {other}"
+        ))),
+    }
+}
+
+/// Helper: map crop_top for chroma planes (accounts for odd alignment).
+fn uv_crop_top(crop_top: u32) -> usize {
+    (crop_top / 2) as usize
+}
+
 fn drain_output(
     codec: &mut MediaCodec,
     frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
@@ -118,18 +245,16 @@ fn drain_output(
         if BufferFlag::EndOfStream.is_contained_in(out_buf.info().flags as i32) {
             continue;
         }
-        let w = out_buf.format().get_i32("width").unwrap_or(0) as u32;
-        let h = out_buf.format().get_i32("height").unwrap_or(0) as u32;
-        let ts_us = out_buf.info().presentation_time_us;
-        let data = out_buf.buffer_slice().unwrap_or_default().to_vec();
-        let frame = VideoFrame {
-            dimensions: Dimensions::new(w, h),
-            format: PixelFormat::Nv12,
-            timestamp: std::time::Duration::from_micros(ts_us as u64),
-            planes: VideoPlanes::Cpu(data),
-        };
-        if frame_tx.send(Ok(frame)).is_err() {
-            return;
+        match output_to_frame(&out_buf) {
+            Ok(frame) => {
+                if frame_tx.send(Ok(frame)).is_err() {
+                    return;
+                }
+            }
+            Err(e) => {
+                let _ = frame_tx.send(Err(e));
+                return;
+            }
         }
     }
 }
@@ -162,16 +287,7 @@ fn decode_loop(
                     }
                     cmd::send_eos(&mut codec)?;
                     cmd::drain_until_eos(&mut codec, |out| {
-                        let w = out.format().get_i32("width").unwrap_or(0) as u32;
-                        let h = out.format().get_i32("height").unwrap_or(0) as u32;
-                        let ts_us = out.info().presentation_time_us;
-                        let data: Vec<u8> = out.buffer_slice().map(|s| s.to_vec()).unwrap_or_default();
-                        let frame = VideoFrame {
-                            dimensions: Dimensions::new(w, h),
-                            format: PixelFormat::Nv12,
-                            timestamp: std::time::Duration::from_micros(ts_us as u64),
-                            planes: VideoPlanes::Cpu(data),
-                        };
+                        let frame = output_to_frame(&out)?;
                         frame_tx.send(Ok(frame)).map_err(|_| Error::Dropped)
                     })?;
                     codec
