@@ -93,7 +93,7 @@ pub fn create(
     config: VideoDecoderConfig,
 ) -> Result<(CrosVideoDecoderInput, CrosVideoDecoderOutput), Error> {
     let codec = config.codec.clone();
-    let fmt = codec_to_fmt(&codec_string).map_err(|e| Error::Platform(e))?;
+    let fmt = codec_to_fmt(&codec).map_err(|e| Error::Platform(e))?;
 
     // Open VA display and validate codec support synchronously (for easier fallback)
     let va_display = libva::Display::open()
