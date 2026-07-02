@@ -1,7 +1,6 @@
 use std::{
     sync::Arc,
     sync::atomic::{AtomicU32, Ordering},
-    sync::mpsc as std_mpsc,
     thread,
 };
 
@@ -33,7 +32,7 @@ use cros_codecs::{
 };
 
 enum Cmd {
-    Packet(EncodedVideoPacket, std_mpsc::Sender<()>),
+    Packet(EncodedVideoPacket),
     Flush(oneshot::Sender<Result<(), Error>>),
     Close,
 }
@@ -56,12 +55,9 @@ impl Drop for CrosVideoDecoderInput {
 impl VideoDecoderInput for CrosVideoDecoderInput {
     fn decode(&mut self, packet: EncodedVideoPacket) -> Result<(), Error> {
         self.queue.fetch_add(1, Ordering::Relaxed);
-        let (ack_tx, ack_rx) = std_mpsc::channel();
         self.tx
-            .send(Cmd::Packet(packet, ack_tx))
-            .map_err(|_| Error::Dropped)?;
-        let result = ack_rx.recv().map_err(|_| Error::Dropped);
-        result
+            .send(Cmd::Packet(packet))
+            .map_err(|_| Error::Dropped)
     }
 
     async fn flush(&mut self) -> Result<(), Error> {
@@ -203,7 +199,7 @@ fn worker_loop(
     };
 
     let va_display_clone = va_display.clone();
-    let mut alloc_frame = move |stream_info: &StreamInfo| -> GenericDmaVideoFrame {
+    let mut alloc_frame = move |stream_info: &StreamInfo| -> Result<GenericDmaVideoFrame, Error> {
         create_video_frame(
             stream_info.coded_resolution.width,
             stream_info.coded_resolution.height,
@@ -245,7 +241,7 @@ fn worker_loop(
                 let _ = done.send(res);
             }
 
-            Cmd::Packet(pkt, ack) => {
+            Cmd::Packet(pkt) => {
                 queue.fetch_sub(1, Ordering::Relaxed);
 
                 let res = (|| -> Result<(), Error> {
@@ -282,7 +278,7 @@ fn worker_loop(
                             }
                             Err(e) => return Err(Error::Platform(format!("{e:?}"))),
                         }
-                        if drain_events(
+                        let _ = drain_events(
                             dec,
                             &mut frame_queue,
                             &frame_tx,
@@ -292,15 +288,11 @@ fn worker_loop(
                             &mut cached_w,
                             &mut cached_h,
                             &mut cached_display,
-                        )? {
-                            break;
-                        }
+                        )?;
                     }
 
                     Ok(())
                 })();
-
-                let _ = ack.send(());
 
                 if let Err(e) = res {
                     let _ = frame_tx.send(Err(e));
@@ -316,7 +308,7 @@ fn drain_events<F: CcVideoFrame + 'static>(
     dec: &mut DynStatelessVideoDecoder<F>,
     frame_queue: &mut Vec<GenericDmaVideoFrame>,
     frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
-    alloc_frame: &mut dyn FnMut(&StreamInfo) -> GenericDmaVideoFrame,
+    alloc_frame: &mut dyn FnMut(&StreamInfo) -> Result<GenericDmaVideoFrame, Error>,
     va_display: &Arc<libva::Display>,
     have_cache: &mut bool,
     cached_w: &mut u32,
@@ -334,7 +326,7 @@ fn drain_events<F: CcVideoFrame + 'static>(
                     *have_cache = true;
                     frame_queue.clear();
                     for _ in 0..info.min_num_frames {
-                        frame_queue.push(alloc_frame(info));
+                        frame_queue.push(alloc_frame(info)?);
                     }
                 }
             }
@@ -366,7 +358,7 @@ fn drain_events<F: CcVideoFrame + 'static>(
                         *cached_h,
                         *cached_display,
                         va_display,
-                    ));
+                    )?);
                 }
             }
         }
@@ -379,7 +371,7 @@ fn create_video_frame(
     h: u32,
     display_resolution: Resolution,
     va_display: &Arc<libva::Display>,
-) -> GenericDmaVideoFrame {
+) -> Result<GenericDmaVideoFrame, Error> {
     let surfaces = va_display
         .create_surfaces::<()>(
             libva::VA_RT_FORMAT_YUV420,
@@ -389,9 +381,13 @@ fn create_video_frame(
             Some(libva::UsageHint::USAGE_HINT_DECODER),
             vec![()],
         )
-        .expect("VA surface allocation failed");
-    let surface = surfaces.into_iter().next().unwrap();
-    let desc = surface.export_prime().expect("VA surface export failed");
+        .map_err(|e| Error::Platform(format!("VA surface allocation failed: {e:?}")))?;
+    let surface = surfaces.into_iter().next().ok_or_else(|| {
+        Error::Platform("VA surface allocation returned zero surfaces".into())
+    })?;
+    let desc = surface
+        .export_prime()
+        .map_err(|e| Error::Platform(format!("VA surface export failed: {e:?}")))?;
     let layer = &desc.layers[0];
     let planes: Vec<_> = (0..layer.num_planes as usize)
         .map(|i| PlaneLayout {
@@ -402,9 +398,13 @@ fn create_video_frame(
         .collect();
     let mut dma_handles = Vec::new();
     for obj in &desc.objects {
-        dma_handles.push(std::fs::File::from(
-            obj.fd.try_clone().expect("FD clone failed"),
-        ));
+        dma_handles.push(
+            std::fs::File::from(
+                obj.fd
+                    .try_clone()
+                    .map_err(|e| Error::Platform(format!("FD clone failed: {e}")))?,
+            ),
+        );
     }
     GenericDmaVideoFrame::new(
         dma_handles,
@@ -417,7 +417,7 @@ fn create_video_frame(
             planes,
         },
     )
-    .expect("GenericDmaVideoFrame construction failed")
+    .map_err(|e| Error::Platform(format!("GenericDmaVideoFrame construction failed: {e:?}")))
 }
 
 fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(

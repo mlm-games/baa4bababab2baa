@@ -126,10 +126,7 @@ fn drain_output(
         let w = out_buf.format().get_i32("width").unwrap_or(0) as u32;
         let h = out_buf.format().get_i32("height").unwrap_or(0) as u32;
         let ts_us = out_buf.info().presentation_time_us;
-        let data = out_buf
-            .buffer_slice()
-            .unwrap_or_default()
-            .to_vec();
+        let data = out_buf.buffer_slice().unwrap_or_default().to_vec();
         let frame = VideoFrame {
             dimensions: Dimensions::new(w, h),
             format: PixelFormat::Nv12,
@@ -151,7 +148,9 @@ fn send_eos(codec: &mut MediaCodec) -> Result<(), Error> {
         }
         thread::sleep(std::time::Duration::from_millis(1));
     }
-    Err(Error::Platform("send_eos timed out waiting for input buffer".into()))
+    Err(Error::Platform(
+        "send_eos timed out waiting for input buffer".into(),
+    ))
 }
 
 fn drain_until_eos(
@@ -182,7 +181,9 @@ fn drain_until_eos(
             Err(_) => thread::sleep(std::time::Duration::from_millis(1)),
         }
     }
-    Err(Error::Platform("drain_until_eos timed out waiting for EOS".into()))
+    Err(Error::Platform(
+        "drain_until_eos timed out waiting for EOS".into(),
+    ))
 }
 
 fn decode_loop(
@@ -195,31 +196,40 @@ fn decode_loop(
         std::collections::VecDeque::new();
 
     loop {
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                Cmd::Packet(pkt) => pending.push_back(pkt),
-                Cmd::Flush(done) => {
-                    let res = (|| -> Result<(), Error> {
+        match cmd_rx.blocking_recv() {
+            Some(Cmd::Packet(pkt)) => pending.push_back(pkt),
+            Some(Cmd::Flush(done)) => {
+                let res = (|| -> Result<(), Error> {
+                    for _ in 0..5000 {
+                        if pending.is_empty() {
+                            break;
+                        }
                         submit_pending(&mut codec, &mut pending, &queue)?;
-                        send_eos(&mut codec)?;
-                        drain_until_eos(&mut codec, &frame_tx)?;
-                        Ok(())
-                    })();
-                    let _ = done.send(res);
-                }
-                Cmd::Close => {
-                    drain_output(&mut codec, &frame_tx);
-                    queue.store(0, Ordering::Relaxed);
-                    return;
-                }
+                        if !pending.is_empty() {
+                            thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                    }
+                    if !pending.is_empty() {
+                        return Err(Error::Platform("flush timed out submitting pending".into()));
+                    }
+                    send_eos(&mut codec)?;
+                    drain_until_eos(&mut codec, &frame_tx)?;
+                    codec
+                        .flush()
+                        .map_err(|e| Error::Platform(format!("{e:?}")))?;
+                    Ok(())
+                })();
+                let _ = done.send(res);
+            }
+            Some(Cmd::Close) | None => {
+                drain_output(&mut codec, &frame_tx);
+                queue.store(0, Ordering::Relaxed);
+                return;
             }
         }
 
         let _ = submit_pending(&mut codec, &mut pending, &queue);
-
         drain_output(&mut codec, &frame_tx);
-
-        thread::sleep(std::time::Duration::from_millis(1));
 
         if cmd_rx.is_closed() && pending.is_empty() {
             drain_output(&mut codec, &frame_tx);
@@ -238,11 +248,17 @@ fn submit_pending(
         if let Ok(buf) = codec.dequeue_input() {
             let mut buf: mediacodec::CodecInputBuffer = buf;
             let (ptr, cap): (*mut u8, usize) = buf.buffer();
-            let copy_len = pkt.payload.len().min(cap);
-            unsafe {
-                std::ptr::copy_nonoverlapping(pkt.payload.as_ptr(), ptr, copy_len);
+            if pkt.payload.len() > cap {
+                return Err(Error::Platform(format!(
+                    "video packet too large: {} > {}",
+                    pkt.payload.len(),
+                    cap
+                )));
             }
-            buf.set_write_size(copy_len);
+            unsafe {
+                std::ptr::copy_nonoverlapping(pkt.payload.as_ptr(), ptr, pkt.payload.len());
+            }
+            buf.set_write_size(pkt.payload.len());
             buf.set_time(pkt.timestamp.as_micros() as u64);
             queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         } else {

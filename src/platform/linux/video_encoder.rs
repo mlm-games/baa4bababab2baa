@@ -31,10 +31,7 @@ use cros_codecs::{
     utils::align_up,
 };
 
-const VA_FOURCC_NV12: u32 = 0x3231564E;
-const VA_RT_FORMAT_YUV420: u32 = 0x00000001;
-
-use va::{Display, Image, Surface, UsageHint, VAImageFormat};
+use va::{Display, Image, Surface, UsageHint, VAImageFormat, VA_RT_FORMAT_YUV420};
 
 type PooledSurface = cros_codecs::backend::vaapi::surface_pool::PooledVaSurface<()>;
 
@@ -113,7 +110,7 @@ fn init_encoder_inner(config: &VideoEncoderConfig) -> Result<EncoderInit, Error>
         .query_image_formats()
         .map_err(|e| Error::Platform(format!("query_image_formats failed: {e:?}")))?
         .into_iter()
-        .find(|f| f.fourcc == VA_FOURCC_NV12)
+        .find(|f| f.fourcc == u32::from(Fourcc::from(b"NV12")))
         .ok_or_else(|| {
             Error::Platform("VAAPI driver does not expose NV12 mapping format".into())
         })?;
@@ -296,45 +293,72 @@ fn worker_loop(
         }
 
         if let Some(done) = flushing.take() {
-            let res = (|| -> Result<(), Error> {
-                encoder
-                    .drain()
-                    .map_err(|e| Error::Platform(format!("drain failed: {e}")))?;
-                Ok(())
-            })();
-            let _ = done.send(res);
-        }
+            // Don't flush while frames are still pending
+            if !pending.is_empty() {
+                flushing = Some(done);
+            } else {
+                let res = (|| -> Result<(), Error> {
+                    encoder
+                        .drain()
+                        .map_err(|e| Error::Platform(format!("drain failed: {e}")))?;
+                    // Poll all remaining output after drain
+                    loop {
+                        match encoder.poll() {
+                            Ok(Some(coded)) => {
+                                let ts = Duration::from_micros(coded.metadata.timestamp);
+                                let keyframe = keyframe_from_bitstream(&coded.bitstream, &config.codec.0)
+                                    .unwrap_or(coded.metadata.force_keyframe);
+                                let pkt = EncodedVideoPacket {
+                                    payload: Bytes::from(coded.bitstream),
+                                    timestamp: ts,
+                                    keyframe,
+                                };
+                                if pkt_tx.send(Ok(pkt)).is_err() {
+                                    return Err(Error::Dropped);
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(e) => return Err(Error::Platform(format!("poll failed: {e}"))),
+                        }
+                    }
+                    Ok(())
+                })();
+                let _ = done.send(res);
+            }
+        } else {
+            // Normal poll output (not flushing)
+            loop {
+                let coded = match encoder.poll() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = pkt_tx.send(Err(Error::Platform(format!("poll failed: {e}"))));
+                        queue.store(0, Ordering::Relaxed);
+                        return;
+                    }
+                };
 
-        loop {
-            let coded = match encoder.poll() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = pkt_tx.send(Err(Error::Platform(format!("poll failed: {e}"))));
+                let Some(coded) = coded else {
+                    break;
+                };
+
+                let ts = Duration::from_micros(coded.metadata.timestamp);
+                let keyframe = keyframe_from_bitstream(&coded.bitstream, &config.codec.0)
+                    .unwrap_or(coded.metadata.force_keyframe);
+
+                let pkt = EncodedVideoPacket {
+                    payload: Bytes::from(coded.bitstream),
+                    timestamp: ts,
+                    keyframe,
+                };
+
+                if pkt_tx.send(Ok(pkt)).is_err() {
                     queue.store(0, Ordering::Relaxed);
                     return;
                 }
-            };
-
-            let Some(coded) = coded else {
-                break;
-            };
-
-            let ts = Duration::from_micros(coded.metadata.timestamp);
-            let keyframe = coded.metadata.force_keyframe;
-
-            let pkt = EncodedVideoPacket {
-                payload: Bytes::from(coded.bitstream),
-                timestamp: ts,
-                keyframe,
-            };
-
-            if pkt_tx.send(Ok(pkt)).is_err() {
-                queue.store(0, Ordering::Relaxed);
-                return;
             }
         }
 
-        if cmd_rx.is_closed() && pending.is_empty() {
+        if cmd_rx.is_closed() && pending.is_empty() && flushing.is_none() {
             queue.store(0, Ordering::Relaxed);
             return;
         }
@@ -490,24 +514,27 @@ fn upload_nv12(
     }
 
     {
-        let mut src = &data[..y_sz];
-        let mut dst = &mut dest[va_image.offsets[0] as usize..];
-
-        for _ in 0..h {
-            dst[..w].copy_from_slice(&src[..w]);
-            dst = &mut dst[va_image.pitches[0] as usize..];
-            src = &src[w..];
+        let y_stride = va_image.pitches[0] as usize;
+        let dst_base = &mut dest[va_image.offsets[0] as usize..];
+        for (row, src_row) in data[..y_sz].chunks(w).enumerate() {
+            let dst_start = row * y_stride;
+            if dst_start + w > dst_base.len() {
+                return Err(Error::Platform("upload_nv12: y plane dst overflow".into()));
+            }
+            dst_base[dst_start..dst_start + w].copy_from_slice(src_row);
         }
     }
 
     {
-        let mut src = &data[y_sz..];
-        let mut dst = &mut dest[va_image.offsets[1] as usize..];
-
-        for _ in 0..(h / 2) {
-            dst[..w].copy_from_slice(&src[..w]);
-            dst = &mut dst[va_image.pitches[1] as usize..];
-            src = &src[w..];
+        let uv_stride = va_image.pitches[1] as usize;
+        let uv_off = va_image.offsets[1] as usize;
+        let dst_base = &mut dest[uv_off..];
+        for (row, src_row) in data[y_sz..].chunks(w).enumerate() {
+            let dst_start = row * uv_stride;
+            if dst_start + w > dst_base.len() {
+                return Err(Error::Platform("upload_nv12: uv plane dst overflow".into()));
+            }
+            dst_base[dst_start..dst_start + w].copy_from_slice(src_row);
         }
     }
 
@@ -518,4 +545,63 @@ fn upload_nv12(
         .map_err(|e| Error::Platform(format!("surface.sync failed: {e:?}")))?;
 
     Ok(())
+}
+
+fn keyframe_from_bitstream(data: &[u8], codec: &str) -> Option<bool> {
+    if data.is_empty() {
+        return None;
+    }
+    match codec {
+        "video/avc" | "video/h264" => {
+            // Skip start code (0x00000001 or 0x000001)
+            let offset = if data.len() > 4 && data[..4] == [0, 0, 0, 1] {
+                4
+            } else if data.len() > 3 && data[..3] == [0, 0, 1] {
+                3
+            } else {
+                return None;
+            };
+            if offset < data.len() {
+                // NAL unit type is in the first byte: type = byte & 0x1F
+                let nal_type = data[offset] & 0x1F;
+                // IDR slice: NAL type 5
+                Some(nal_type == 5)
+            } else {
+                None
+            }
+        }
+        "video/hevc" | "video/h265" => {
+            let offset = if data.len() > 4 && data[..4] == [0, 0, 0, 1] {
+                4
+            } else if data.len() > 3 && data[..3] == [0, 0, 1] {
+                3
+            } else {
+                return None;
+            };
+            if offset < data.len() {
+                // NAL unit type is in the first byte shifted right by 1: (byte >> 1) & 0x3F
+                let nal_type = (data[offset] >> 1) & 0x3F;
+                // IDR_W_RADL = 19, IDR_N_LP = 20, CRA_NUT = 21
+                Some(nal_type == 19 || nal_type == 20 || nal_type == 21)
+            } else {
+                None
+            }
+        }
+        "video/vp9" => {
+            // Frame marker byte, bit 0 indicates keyframe (0 = keyframe)
+            Some((data[0] & 0x80) == 0)
+        }
+        "video/av1" | "video/av01" => {
+            // Temporal delimiter + sequence header. Keyframe = frame_type == 0 (KEY_FRAME)
+            // The frame_type is in the uncompressed header after the sequence header
+            // AV1 OBU header: first byte has obu_type in bits 3-7
+            if data.is_empty() {
+                return None;
+            }
+            let obu_type = (data[0] >> 3) & 0x0F;
+            // OBU_SEQUENCE_HEADER = 1, OBU_FRAME = 6, OBU_FRAME_HEADER = 3
+            Some(obu_type == 1 || obu_type == 6 || obu_type == 3)
+        }
+        _ => None,
+    }
 }
