@@ -4,6 +4,7 @@ use std::thread;
 use mediacodec::{BufferFlag, MediaCodec, MediaFormat};
 use tokio::sync::{mpsc, oneshot};
 
+use super::cmd::{self, Cmd};
 use crate::{
     error::Error,
     traits::{VideoDecoderInput, VideoDecoderOutput},
@@ -12,14 +13,8 @@ use crate::{
     },
 };
 
-enum Cmd {
-    Packet(EncodedVideoPacket),
-    Flush(oneshot::Sender<Result<(), Error>>),
-    Close,
-}
-
 pub struct AndroidVideoDecoderInput {
-    tx: mpsc::UnboundedSender<Cmd>,
+    tx: mpsc::UnboundedSender<Cmd<EncodedVideoPacket>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
@@ -38,7 +33,7 @@ impl VideoDecoderInput for AndroidVideoDecoderInput {
         self.queue
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.tx
-            .send(Cmd::Packet(packet))
+            .send(Cmd::Item(packet))
             .map_err(|_| Error::Dropped)
     }
 
@@ -99,7 +94,7 @@ pub fn create(
         .start()
         .map_err(|e| Error::Platform(format!("{e:?}")))?;
 
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd>();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd<EncodedVideoPacket>>();
     let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Result<VideoFrame, Error>>();
     let queue = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let queue2 = queue.clone();
@@ -139,56 +134,9 @@ fn drain_output(
     }
 }
 
-fn send_eos(codec: &mut MediaCodec) -> Result<(), Error> {
-    for _ in 0..5000 {
-        if let Ok(buf) = codec.dequeue_input(0) {
-            let mut buf: mediacodec::CodecInputBuffer = buf;
-            buf.set_flags(BufferFlag::EndOfStream as u32);
-            return Ok(());
-        }
-        thread::sleep(std::time::Duration::from_millis(1));
-    }
-    Err(Error::Platform(
-        "send_eos timed out waiting for input buffer".into(),
-    ))
-}
-
-fn drain_until_eos(
-    codec: &mut MediaCodec,
-    frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
-) -> Result<(), Error> {
-    for _ in 0..5000 {
-        match codec.dequeue_output(1000) {
-            Ok(out) => {
-                let out: mediacodec::CodecOutputBuffer = out;
-                if BufferFlag::EndOfStream.is_contained_in(out.info().flags as i32) {
-                    return Ok(());
-                }
-                let w = out.format().get_i32("width").unwrap_or(0) as u32;
-                let h = out.format().get_i32("height").unwrap_or(0) as u32;
-                let ts_us = out.info().presentation_time_us;
-                let data: Vec<u8> = out.buffer_slice().map(|s| s.to_vec()).unwrap_or_default();
-                let frame = VideoFrame {
-                    dimensions: Dimensions::new(w, h),
-                    format: PixelFormat::Nv12,
-                    timestamp: std::time::Duration::from_micros(ts_us as u64),
-                    planes: VideoPlanes::Cpu(data),
-                };
-                if frame_tx.send(Ok(frame)).is_err() {
-                    return Err(Error::Dropped);
-                }
-            }
-            Err(_) => thread::sleep(std::time::Duration::from_millis(1)),
-        }
-    }
-    Err(Error::Platform(
-        "drain_until_eos timed out waiting for EOS".into(),
-    ))
-}
-
 fn decode_loop(
     mut codec: MediaCodec,
-    mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
+    mut cmd_rx: mpsc::UnboundedReceiver<Cmd<EncodedVideoPacket>>,
     frame_tx: mpsc::UnboundedSender<Result<VideoFrame, Error>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) {
@@ -197,7 +145,7 @@ fn decode_loop(
 
     loop {
         match cmd_rx.blocking_recv() {
-            Some(Cmd::Packet(pkt)) => pending.push_back(pkt),
+            Some(Cmd::Item(pkt)) => pending.push_back(pkt),
             Some(Cmd::Flush(done)) => {
                 let res = (|| -> Result<(), Error> {
                     for _ in 0..5000 {
@@ -212,8 +160,20 @@ fn decode_loop(
                     if !pending.is_empty() {
                         return Err(Error::Platform("flush timed out submitting pending".into()));
                     }
-                    send_eos(&mut codec)?;
-                    drain_until_eos(&mut codec, &frame_tx)?;
+                    cmd::send_eos(&mut codec)?;
+                    cmd::drain_until_eos(&mut codec, |out| {
+                        let w = out.format().get_i32("width").unwrap_or(0) as u32;
+                        let h = out.format().get_i32("height").unwrap_or(0) as u32;
+                        let ts_us = out.info().presentation_time_us;
+                        let data: Vec<u8> = out.buffer_slice().map(|s| s.to_vec()).unwrap_or_default();
+                        let frame = VideoFrame {
+                            dimensions: Dimensions::new(w, h),
+                            format: PixelFormat::Nv12,
+                            timestamp: std::time::Duration::from_micros(ts_us as u64),
+                            planes: VideoPlanes::Cpu(data),
+                        };
+                        frame_tx.send(Ok(frame)).map_err(|_| Error::Dropped)
+                    })?;
                     codec
                         .flush()
                         .map_err(|e| Error::Platform(format!("{e:?}")))?;

@@ -5,20 +5,15 @@ use mediacodec::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use super::cmd::{self, Cmd};
 use crate::{
     error::Error,
     traits::{AudioDecoderInput, AudioDecoderOutput},
     types::{AudioDecoderConfig, AudioFrame, EncodedAudioPacket, SampleFormat},
 };
 
-enum Cmd {
-    Packet(EncodedAudioPacket),
-    Flush(oneshot::Sender<Result<(), Error>>),
-    Close,
-}
-
 pub struct AndroidAudioDecoderInput {
-    tx: mpsc::UnboundedSender<Cmd>,
+    tx: mpsc::UnboundedSender<Cmd<EncodedAudioPacket>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
@@ -30,7 +25,7 @@ impl AudioDecoderInput for AndroidAudioDecoderInput {
     fn decode(&mut self, packet: EncodedAudioPacket) -> Result<(), Error> {
         self.queue
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.tx.send(Cmd::Packet(packet)).map_err(|_| Error::Dropped)
+        self.tx.send(Cmd::Item(packet)).map_err(|_| Error::Dropped)
     }
 
     async fn flush(&mut self) -> Result<(), Error> {
@@ -79,7 +74,7 @@ pub fn create(
         .start()
         .map_err(|e| Error::Platform(format!("{e:?}")))?;
 
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd>();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd<EncodedAudioPacket>>();
     let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Result<AudioFrame, Error>>();
     let queue = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let queue2 = queue.clone();
@@ -169,7 +164,7 @@ fn drain_output(
 
 fn audio_decode_loop(
     mut codec: MediaCodec,
-    mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
+    mut cmd_rx: mpsc::UnboundedReceiver<Cmd<EncodedAudioPacket>>,
     frame_tx: mpsc::UnboundedSender<Result<AudioFrame, Error>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
     fallback_channels: u32,
@@ -177,7 +172,7 @@ fn audio_decode_loop(
 ) {
     loop {
         match cmd_rx.blocking_recv() {
-            Some(Cmd::Packet(pkt)) => {
+            Some(Cmd::Item(pkt)) => {
                 match submit_one(&mut codec, &pkt, &queue) {
                     Ok(()) => {}
                     Err(e) => {
@@ -188,8 +183,37 @@ fn audio_decode_loop(
             }
             Some(Cmd::Flush(done)) => {
                 let res = (|| -> Result<(), Error> {
-                    send_audio_eos(&mut codec)?;
-                    drain_audio_until_eos(&mut codec, &frame_tx, fallback_channels, fallback_sample_rate)?;
+                    cmd::send_eos(&mut codec)?;
+                    cmd::drain_until_eos(&mut codec, |out_buf| {
+                        let fmt = out_buf.format();
+                        let channels = fmt.get_i32("channel-count").map(|v| v as u32).unwrap_or(fallback_channels);
+                        let sample_rate = fmt.get_i32("sample-rate").map(|v| v as u32).unwrap_or(fallback_sample_rate);
+                        let ts = std::time::Duration::from_micros(out_buf.info().presentation_time_us as u64);
+                        if let Some(mediacodec::Frame::Audio(audio)) = out_buf.frame() {
+                            let audio_fmt = audio.format();
+                            let (fmt_out, samples) = match audio_fmt {
+                                McSampleFormat::S16(buf) => {
+                                    let bytes: Vec<u8> =
+                                        buf.iter().flat_map(|s| i16::to_le_bytes(*s)).collect();
+                                    (SampleFormat::S16, bytes)
+                                }
+                                McSampleFormat::F32(buf) => {
+                                    let bytes: Vec<u8> =
+                                        buf.iter().flat_map(|s| f32::to_le_bytes(*s)).collect();
+                                    (SampleFormat::F32, bytes)
+                                }
+                            };
+                            let frame = AudioFrame {
+                                timestamp: ts,
+                                sample_rate,
+                                channels,
+                                format: fmt_out,
+                                samples,
+                            };
+                            frame_tx.send(Ok(frame)).map_err(|_| Error::Dropped)?;
+                        }
+                        Ok(())
+                    })?;
                     codec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
                     Ok(())
                 })();
@@ -205,67 +229,4 @@ fn audio_decode_loop(
     }
 }
 
-fn send_audio_eos(codec: &mut MediaCodec) -> Result<(), Error> {
-    for _ in 0..5000 {
-        if let Ok(buf) = codec.dequeue_input(0) {
-            let mut buf: mediacodec::CodecInputBuffer = buf;
-            buf.set_flags(mediacodec::BufferFlag::EndOfStream as u32);
-            return Ok(());
-        }
-        thread::sleep(std::time::Duration::from_millis(1));
-    }
-    Err(Error::Platform("send_audio_eos timed out".into()))
-}
 
-fn drain_audio_until_eos(
-    codec: &mut MediaCodec,
-    frame_tx: &mpsc::UnboundedSender<Result<AudioFrame, Error>>,
-    fallback_channels: u32,
-    fallback_sample_rate: u32,
-) -> Result<(), Error> {
-    for _ in 0..5000 {
-        match codec.dequeue_output(1000) {
-            Ok(out_buf) => {
-                let out_buf: CodecOutputBuffer = out_buf;
-                if mediacodec::BufferFlag::EndOfStream.is_contained_in(out_buf.info().flags as i32) {
-                    return Ok(());
-                }
-                let fmt = out_buf.format();
-                let channels = fmt.get_i32("channel-count").map(|v| v as u32).unwrap_or(fallback_channels);
-                let sample_rate = fmt.get_i32("sample-rate").map(|v| v as u32).unwrap_or(fallback_sample_rate);
-                let ts =
-                    std::time::Duration::from_micros(out_buf.info().presentation_time_us as u64);
-
-                if let Some(mediacodec::Frame::Audio(audio)) = out_buf.frame() {
-                    let audio_fmt = audio.format();
-                    let (fmt_out, samples) = match audio_fmt {
-                        McSampleFormat::S16(buf) => {
-                            let bytes: Vec<u8> =
-                                buf.iter().flat_map(|s| i16::to_le_bytes(*s)).collect();
-                            (SampleFormat::S16, bytes)
-                        }
-                        McSampleFormat::F32(buf) => {
-                            let bytes: Vec<u8> =
-                                buf.iter().flat_map(|s| f32::to_le_bytes(*s)).collect();
-                            (SampleFormat::F32, bytes)
-                        }
-                    };
-
-                    let frame = AudioFrame {
-                        timestamp: ts,
-                        sample_rate,
-                        channels,
-                        format: fmt_out,
-                        samples,
-                    };
-
-                    if frame_tx.send(Ok(frame)).is_err() {
-                        return Err(Error::Dropped);
-                    }
-                }
-            }
-            Err(_) => thread::sleep(std::time::Duration::from_millis(1)),
-        }
-    }
-    Err(Error::Platform("drain_audio_until_eos timed out".into()))
-}

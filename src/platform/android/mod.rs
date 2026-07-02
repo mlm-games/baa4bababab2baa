@@ -1,5 +1,6 @@
 mod audio_decoder;
 mod audio_encoder;
+mod cmd;
 mod video_decoder;
 mod video_encoder;
 

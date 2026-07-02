@@ -9,20 +9,15 @@ use std::collections::VecDeque;
 use mediacodec::{BufferFlag, MediaCodec, MediaFormat};
 use tokio::sync::{mpsc, oneshot};
 
+use super::cmd::{self, Cmd};
 use crate::{
     error::Error,
     traits::{VideoEncoderInput, VideoEncoderOutput},
     types::{Dimensions, EncodedVideoPacket, VideoDecoderConfig, VideoEncoderConfig, VideoFrame, VideoPlanes},
 };
 
-enum Cmd {
-    Frame(VideoFrame, Option<bool>),
-    Flush(oneshot::Sender<Result<(), Error>>),
-    Close,
-}
-
 pub struct AndroidVideoEncoderInput {
-    tx: mpsc::UnboundedSender<Cmd>,
+    tx: mpsc::UnboundedSender<Cmd<(VideoFrame, Option<bool>)>>,
     queue: Arc<AtomicU32>,
     config: VideoEncoderConfig,
 }
@@ -41,7 +36,7 @@ pub struct AndroidVideoEncoderOutput {
 impl VideoEncoderInput for AndroidVideoEncoderInput {
     fn encode(&mut self, frame: VideoFrame, keyframe: Option<bool>) -> Result<(), Error> {
         self.queue.fetch_add(1, Ordering::Relaxed);
-        self.tx.send(Cmd::Frame(frame, keyframe)).map_err(|_| Error::Dropped)
+        self.tx.send(Cmd::Item((frame, keyframe))).map_err(|_| Error::Dropped)
     }
 
     async fn flush(&mut self) -> Result<(), Error> {
@@ -104,7 +99,7 @@ pub fn create(
     // Poll for initial codec config (SPS/PPS) before starting worker
     let decoder_cfg = poll_encoder_config(&mut codec, &config)?;
 
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd>();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd<(VideoFrame, Option<bool>)>>();
     let (pkt_tx, pkt_rx) = mpsc::unbounded_channel::<Result<EncodedVideoPacket, Error>>();
     let queue = Arc::new(AtomicU32::new(0));
     let queue2 = queue.clone();
@@ -228,59 +223,9 @@ fn drain_encoded_output(
     Ok(())
 }
 
-fn send_encoder_eos(codec: &mut MediaCodec) -> Result<(), Error> {
-    for _ in 0..5000 {
-        if let Ok(buf) = codec.dequeue_input(0) {
-            let mut buf: mediacodec::CodecInputBuffer = buf;
-            buf.set_flags(BufferFlag::EndOfStream as u32);
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(1));
-    }
-    Err(Error::Platform("send_encoder_eos timed out".into()))
-}
-
-fn drain_encoder_until_eos(
-    codec: &mut MediaCodec,
-    pkt_tx: &mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
-) -> Result<(), Error> {
-    for _ in 0..5000 {
-        match codec.dequeue_output(1000) {
-            Ok(out) => {
-                let out: mediacodec::CodecOutputBuffer = out;
-                let flags = out.info().flags as i32;
-                if BufferFlag::EndOfStream.is_contained_in(flags) {
-                    return Ok(());
-                }
-                if BufferFlag::CodecConfig.is_contained_in(flags) {
-                    continue;
-                }
-                let info = out.info();
-                let is_key = BufferFlag::KeyFrame.is_contained_in(flags);
-                let ts = Duration::from_micros(info.presentation_time_us as u64);
-                let payload_bytes = if let Some(slice) = out.buffer_slice() {
-                    bytes::Bytes::copy_from_slice(slice)
-                } else {
-                    bytes::Bytes::new()
-                };
-                let pkt = EncodedVideoPacket {
-                    payload: payload_bytes,
-                    timestamp: ts,
-                    keyframe: is_key,
-                };
-                if pkt_tx.send(Ok(pkt)).is_err() {
-                    return Err(Error::Dropped);
-                }
-            }
-            Err(_) => thread::sleep(Duration::from_millis(1)),
-        }
-    }
-    Err(Error::Platform("drain_encoder_until_eos timed out".into()))
-}
-
 fn encode_loop(
     mut codec: MediaCodec,
-    mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
+    mut cmd_rx: mpsc::UnboundedReceiver<Cmd<(VideoFrame, Option<bool>)>>,
     pkt_tx: mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
     queue: Arc<AtomicU32>,
 ) {
@@ -288,12 +233,30 @@ fn encode_loop(
 
     loop {
         match cmd_rx.blocking_recv() {
-            Some(Cmd::Frame(frame, keyframe)) => pending.push_back((frame, keyframe)),
+            Some(Cmd::Item((frame, keyframe))) => pending.push_back((frame, keyframe)),
             Some(Cmd::Flush(done)) => {
                 let res = (|| -> Result<(), Error> {
                     drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx)?;
-                    send_encoder_eos(&mut codec)?;
-                    drain_encoder_until_eos(&mut codec, &pkt_tx)?;
+                    cmd::send_eos(&mut codec)?;
+                    cmd::drain_until_eos(&mut codec, |out| {
+                        let flags = out.info().flags as i32;
+                        if BufferFlag::CodecConfig.is_contained_in(flags) {
+                            return Ok(());
+                        }
+                        let is_key = BufferFlag::KeyFrame.is_contained_in(flags);
+                        let ts = Duration::from_micros(out.info().presentation_time_us as u64);
+                        let payload_bytes = if let Some(slice) = out.buffer_slice() {
+                            bytes::Bytes::copy_from_slice(slice)
+                        } else {
+                            bytes::Bytes::new()
+                        };
+                        let pkt = EncodedVideoPacket {
+                            payload: payload_bytes,
+                            timestamp: ts,
+                            keyframe: is_key,
+                        };
+                        pkt_tx.send(Ok(pkt)).map_err(|_| Error::Dropped)
+                    })?;
                     codec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
                     Ok(())
                 })();

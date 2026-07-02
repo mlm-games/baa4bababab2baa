@@ -3,20 +3,15 @@ use std::thread;
 use mediacodec::{BufferFlag, MediaCodec, MediaFormat};
 use tokio::sync::{mpsc, oneshot};
 
+use super::cmd::{self, Cmd};
 use crate::{
     error::Error,
     traits::{AudioEncoderInput, AudioEncoderOutput},
     types::{AudioDecoderConfig, AudioEncoderConfig, AudioFrame, EncodedAudioPacket},
 };
 
-enum Cmd {
-    Frame(AudioFrame),
-    Flush(oneshot::Sender<Result<(), Error>>),
-    Close,
-}
-
 pub struct AndroidAudioEncoderInput {
-    tx: mpsc::UnboundedSender<Cmd>,
+    tx: mpsc::UnboundedSender<Cmd<AudioFrame>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
     config: AudioEncoderConfig,
 }
@@ -29,7 +24,7 @@ impl AudioEncoderInput for AndroidAudioEncoderInput {
     fn encode(&mut self, frame: AudioFrame) -> Result<(), Error> {
         self.queue
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.tx.send(Cmd::Frame(frame)).map_err(|_| Error::Dropped)
+        self.tx.send(Cmd::Item(frame)).map_err(|_| Error::Dropped)
     }
 
     async fn flush(&mut self) -> Result<(), Error> {
@@ -89,7 +84,7 @@ pub fn create(
         .start()
         .map_err(|e| Error::Platform(format!("{e:?}")))?;
 
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd>();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd<AudioFrame>>();
     let (pkt_tx, pkt_rx) = mpsc::unbounded_channel::<Result<EncodedAudioPacket, Error>>();
     let queue = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let queue2 = queue.clone();
@@ -165,60 +160,15 @@ fn drain_encoded_output(
     }
 }
 
-fn send_audio_eos(codec: &mut MediaCodec) -> Result<(), Error> {
-    for _ in 0..5000 {
-        if let Ok(buf) = codec.dequeue_input(0) {
-            let mut buf: mediacodec::CodecInputBuffer = buf;
-            buf.set_flags(BufferFlag::EndOfStream as u32);
-            return Ok(());
-        }
-        thread::sleep(std::time::Duration::from_millis(1));
-    }
-    Err(Error::Platform("send_audio_eos timed out".into()))
-}
-
-fn drain_encoder_until_eos(
-    codec: &mut MediaCodec,
-    pkt_tx: &mpsc::UnboundedSender<Result<EncodedAudioPacket, Error>>,
-) -> Result<(), Error> {
-    for _ in 0..5000 {
-        match codec.dequeue_output(1000) {
-            Ok(out) => {
-                let out: mediacodec::CodecOutputBuffer = out;
-                if BufferFlag::EndOfStream.is_contained_in(out.info().flags as i32) {
-                    return Ok(());
-                }
-                let info = out.info();
-                let ts = std::time::Duration::from_micros(info.presentation_time_us as u64);
-                let payload = if let Some(slice) = out.buffer_slice() {
-                    bytes::Bytes::copy_from_slice(slice)
-                } else {
-                    bytes::Bytes::new()
-                };
-                let pkt = EncodedAudioPacket {
-                    payload,
-                    timestamp: ts,
-                    keyframe: false,
-                };
-                if pkt_tx.send(Ok(pkt)).is_err() {
-                    return Err(Error::Dropped);
-                }
-            }
-            Err(_) => thread::sleep(std::time::Duration::from_millis(1)),
-        }
-    }
-    Err(Error::Platform("drain_encoder_until_eos timed out".into()))
-}
-
 fn audio_encode_loop(
     mut codec: MediaCodec,
-    mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
+    mut cmd_rx: mpsc::UnboundedReceiver<Cmd<AudioFrame>>,
     pkt_tx: mpsc::UnboundedSender<Result<EncodedAudioPacket, Error>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) {
     loop {
         match cmd_rx.blocking_recv() {
-            Some(Cmd::Frame(frame)) => {
+            Some(Cmd::Item(frame)) => {
                 if let Err(e) = submit_one(&mut codec, &frame, &queue) {
                     let _ = pkt_tx.send(Err(e));
                     return;
@@ -226,8 +176,21 @@ fn audio_encode_loop(
             }
             Some(Cmd::Flush(done)) => {
                 let res = (|| -> Result<(), Error> {
-                    send_audio_eos(&mut codec)?;
-                    drain_encoder_until_eos(&mut codec, &pkt_tx)?;
+                    cmd::send_eos(&mut codec)?;
+                    cmd::drain_until_eos(&mut codec, |out| {
+                        let ts = std::time::Duration::from_micros(out.info().presentation_time_us as u64);
+                        let payload = if let Some(slice) = out.buffer_slice() {
+                            bytes::Bytes::copy_from_slice(slice)
+                        } else {
+                            bytes::Bytes::new()
+                        };
+                        let pkt = EncodedAudioPacket {
+                            payload,
+                            timestamp: ts,
+                            keyframe: false,
+                        };
+                        pkt_tx.send(Ok(pkt)).map_err(|_| Error::Dropped)
+                    })?;
                     codec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
                     Ok(())
                 })();
