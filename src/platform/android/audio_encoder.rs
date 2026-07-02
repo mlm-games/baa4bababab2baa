@@ -70,17 +70,17 @@ pub fn create(
     config: AudioEncoderConfig,
 ) -> Result<(AndroidAudioEncoderInput, AndroidAudioEncoderOutput), Error> {
     let mut format =
-        MediaFormat::new().ok_or_else(|| Error::Platform("Failed to create MediaFormat".into()))?;
-    format.set_string("mime", &config.codec.0);
-    format.set_i32("channel-count", config.channels as i32);
-    format.set_i32("sample-rate", config.sample_rate as i32);
+        MediaFormat::new().map_err(|_| Error::Platform("Failed to create MediaFormat".into()))?;
+    let _ = format.set_string("mime", &config.codec.0);
+    let _ = format.set_i32("channel-count", config.channels as i32);
+    let _ = format.set_i32("sample-rate", config.sample_rate as i32);
     if let Some(br) = config.bitrate {
-        format.set_i32("bitrate", br as i32);
+        let _ = format.set_i32("bitrate", br as i32);
     }
 
     let mime = config.codec.0.clone();
     let mut codec = MediaCodec::create_encoder(&mime)
-        .ok_or_else(|| Error::Platform(format!("No audio encoder for {mime}")))?;
+        .map_err(|e| Error::Platform(format!("No audio encoder for {mime}: {e:?}")))?;
 
     codec
         .init(&format, None, 1)
@@ -111,7 +111,7 @@ fn submit_one(
     frame: &AudioFrame,
     queue: &std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) -> Result<(), Error> {
-    if let Ok(buf) = codec.dequeue_input() {
+    if let Ok(buf) = codec.dequeue_input(0) {
         let mut buf: mediacodec::CodecInputBuffer = buf;
         let (ptr, cap): (*mut u8, usize) = buf.buffer();
         if frame.samples.len() > cap {
@@ -137,7 +137,7 @@ fn drain_encoded_output(
     codec: &mut MediaCodec,
     pkt_tx: &mpsc::UnboundedSender<Result<EncodedAudioPacket, Error>>,
 ) {
-    while let Ok(out) = codec.dequeue_output() {
+    while let Ok(out) = codec.dequeue_output(0) {
         let out_buf: mediacodec::CodecOutputBuffer = out;
         let info = out_buf.info();
         let is_key = false;
@@ -167,7 +167,7 @@ fn drain_encoded_output(
 
 fn send_audio_eos(codec: &mut MediaCodec) -> Result<(), Error> {
     for _ in 0..5000 {
-        if let Ok(buf) = codec.dequeue_input() {
+        if let Ok(buf) = codec.dequeue_input(0) {
             let mut buf: mediacodec::CodecInputBuffer = buf;
             buf.set_flags(BufferFlag::EndOfStream as u32);
             return Ok(());
@@ -182,7 +182,7 @@ fn drain_encoder_until_eos(
     pkt_tx: &mpsc::UnboundedSender<Result<EncodedAudioPacket, Error>>,
 ) -> Result<(), Error> {
     for _ in 0..5000 {
-        match codec.dequeue_output() {
+        match codec.dequeue_output(1000) {
             Ok(out) => {
                 let out: mediacodec::CodecOutputBuffer = out;
                 if BufferFlag::EndOfStream.is_contained_in(out.info().flags as i32) {

@@ -75,12 +75,12 @@ pub fn create(
     config: VideoDecoderConfig,
 ) -> Result<(AndroidVideoDecoderInput, AndroidVideoDecoderOutput), Error> {
     let mut format =
-        MediaFormat::new().ok_or_else(|| Error::Platform("Failed to create MediaFormat".into()))?;
-    format.set_string("mime", &config.codec.0);
+        MediaFormat::new().map_err(|_| Error::Platform("Failed to create MediaFormat".into()))?;
+    let _ = format.set_string("mime", &config.codec.0);
 
     if let Some(res) = config.resolution {
-        format.set_i32("width", res.width as i32);
-        format.set_i32("height", res.height as i32);
+        let _ = format.set_i32("width", res.width as i32);
+        let _ = format.set_i32("height", res.height as i32);
     }
 
     if let Some(desc) = &config.description {
@@ -90,7 +90,7 @@ pub fn create(
     let mime = config.codec.0.clone();
 
     let mut codec = MediaCodec::create_decoder(&mime)
-        .ok_or_else(|| Error::Platform(format!("No decoder for {mime}")))?;
+        .map_err(|e| Error::Platform(format!("No decoder for {mime}: {e:?}")))?;
 
     codec
         .init(&format, None, 0)
@@ -118,7 +118,7 @@ fn drain_output(
     codec: &mut MediaCodec,
     frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
 ) {
-    while let Ok(out) = codec.dequeue_output() {
+    while let Ok(out) = codec.dequeue_output(0) {
         let out_buf: mediacodec::CodecOutputBuffer = out;
         if BufferFlag::EndOfStream.is_contained_in(out_buf.info().flags as i32) {
             continue;
@@ -141,7 +141,7 @@ fn drain_output(
 
 fn send_eos(codec: &mut MediaCodec) -> Result<(), Error> {
     for _ in 0..5000 {
-        if let Ok(buf) = codec.dequeue_input() {
+        if let Ok(buf) = codec.dequeue_input(0) {
             let mut buf: mediacodec::CodecInputBuffer = buf;
             buf.set_flags(BufferFlag::EndOfStream as u32);
             return Ok(());
@@ -158,7 +158,7 @@ fn drain_until_eos(
     frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
 ) -> Result<(), Error> {
     for _ in 0..5000 {
-        match codec.dequeue_output() {
+        match codec.dequeue_output(1000) {
             Ok(out) => {
                 let out: mediacodec::CodecOutputBuffer = out;
                 if BufferFlag::EndOfStream.is_contained_in(out.info().flags as i32) {
@@ -245,7 +245,7 @@ fn submit_pending(
     queue: &std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) -> Result<(), Error> {
     while let Some(pkt) = pending.pop_front() {
-        if let Ok(buf) = codec.dequeue_input() {
+        if let Ok(buf) = codec.dequeue_input(0) {
             let mut buf: mediacodec::CodecInputBuffer = buf;
             let (ptr, cap): (*mut u8, usize) = buf.buffer();
             if pkt.payload.len() > cap {

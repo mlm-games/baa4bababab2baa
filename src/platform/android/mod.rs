@@ -52,27 +52,27 @@ impl MediaCodecHost {
         &self,
         config: &VideoEncoderConfig,
     ) -> Result<bool, Error> {
-        Ok(mediacodec::MediaCodec::create_encoder(&config.codec.0).is_some())
+        Ok(mediacodec::MediaCodec::create_encoder(&config.codec.0).is_ok())
     }
 
     pub async fn is_video_decoder_supported(
         &self,
         config: &VideoDecoderConfig,
     ) -> Result<bool, Error> {
-        Ok(mediacodec::MediaCodec::create_decoder(&config.codec.0).is_some())
+        Ok(mediacodec::MediaCodec::create_decoder(&config.codec.0).is_ok())
     }
 
     pub async fn is_audio_encoder_supported(
         &self,
         config: &AudioEncoderConfig,
     ) -> Result<bool, Error> {
-        Ok(mediacodec::MediaCodec::create_encoder(&config.codec.0).is_some())
+        Ok(mediacodec::MediaCodec::create_encoder(&config.codec.0).is_ok())
     }
 
     pub async fn is_audio_decoder_supported(
         &self,
         config: &AudioDecoderConfig,
     ) -> Result<bool, Error> {
-        Ok(mediacodec::MediaCodec::create_decoder(&config.codec.0).is_some())
+        Ok(mediacodec::MediaCodec::create_decoder(&config.codec.0).is_ok())
     }
 }

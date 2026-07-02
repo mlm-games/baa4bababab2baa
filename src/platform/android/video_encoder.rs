@@ -76,23 +76,23 @@ pub fn create(
     config: VideoEncoderConfig,
 ) -> Result<(AndroidVideoEncoderInput, AndroidVideoEncoderOutput), Error> {
     let mut format =
-        MediaFormat::new().ok_or_else(|| Error::Platform("Failed to create MediaFormat".into()))?;
+        MediaFormat::new().map_err(|_| Error::Platform("Failed to create MediaFormat".into()))?;
 
-    format.set_string("mime", &config.codec.0);
-    format.set_i32("width", config.dimensions.width as i32);
-    format.set_i32("height", config.dimensions.height as i32);
+    let _ = format.set_string("mime", &config.codec.0);
+    let _ = format.set_i32("width", config.dimensions.width as i32);
+    let _ = format.set_i32("height", config.dimensions.height as i32);
     if let Some(br) = config.bitrate {
-        format.set_i32("bitrate", br as i32);
+        let _ = format.set_i32("bitrate", br as i32);
     }
     if let Some(fr) = config.framerate {
-        format.set_i32("frame-rate", fr as i32);
+        let _ = format.set_i32("frame-rate", fr as i32);
     }
-    format.set_i32("i-frame-interval", 1);
-    format.set_i32("color-format", 21); // COLOR_FormatYUV420SemiPlanar (NV12)
+    let _ = format.set_i32("i-frame-interval", 1);
+    let _ = format.set_i32("color-format", 21); // COLOR_FormatYUV420SemiPlanar (NV12)
 
     let mime = config.codec.0.clone();
     let mut codec = MediaCodec::create_encoder(&mime)
-        .ok_or_else(|| Error::Platform(format!("No encoder for {mime}")))?;
+        .map_err(|e| Error::Platform(format!("No encoder for {mime}: {e:?}")))?;
 
     codec
         .init(&format, None, 1)
@@ -131,11 +131,11 @@ fn poll_encoder_config(
     config: &VideoEncoderConfig,
 ) -> Result<Option<VideoDecoderConfig>, Error> {
     for _ in 0..500 {
-        match codec.dequeue_output() {
+        match codec.dequeue_output(1000) {
             Ok(out) => {
                 let out_buf: mediacodec::CodecOutputBuffer = out;
                 let info = out_buf.info();
-                if (info.flags as i32 & 2) != 0 {
+                if BufferFlag::CodecConfig.is_contained_in(info.flags as i32) {
                     if let Some(slice) = out_buf.buffer_slice() {
                         let data = slice.to_vec();
                         return Ok(Some(VideoDecoderConfig {
@@ -160,7 +160,7 @@ fn drain_pending_frames(
     _pkt_tx: &mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
 ) -> Result<(), Error> {
     while let Some((frame, keyframe)) = pending.pop_front() {
-        if let Ok(buf) = codec.dequeue_input() {
+        if let Ok(buf) = codec.dequeue_input(0) {
             let mut buf: mediacodec::CodecInputBuffer = buf;
             let (ptr, cap): (*mut u8, usize) = buf.buffer();
             let data = match &frame.planes {
@@ -180,7 +180,7 @@ fn drain_pending_frames(
             buf.set_write_size(data.len());
             buf.set_time(frame.timestamp.as_micros() as u64);
             if keyframe.unwrap_or(false) {
-                buf.set_flags(BufferFlag::Encode as u32);
+                buf.set_flags(BufferFlag::KeyFrame as u32);
             }
             queue.fetch_sub(1, Ordering::Relaxed);
         } else {
@@ -195,18 +195,17 @@ fn drain_encoded_output(
     codec: &mut MediaCodec,
     pkt_tx: &mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
 ) -> Result<(), Error> {
-    while let Ok(out) = codec.dequeue_output() {
+    while let Ok(out) = codec.dequeue_output(0) {
         let out_buf: mediacodec::CodecOutputBuffer = out;
         let info = out_buf.info();
         let flags = info.flags as i32;
-        let is_key = BufferFlag::Encode.is_contained_in(flags);
+        let is_key = BufferFlag::KeyFrame.is_contained_in(flags);
         let ts = Duration::from_micros(info.presentation_time_us as u64);
 
         if BufferFlag::EndOfStream.is_contained_in(flags) {
             continue;
         }
-        // Skip codec config buffers (CODEC_CONFIG = 2), they're not encoded frames
-        if (flags & 2) != 0 {
+        if BufferFlag::CodecConfig.is_contained_in(flags) {
             continue;
         }
 
@@ -231,7 +230,7 @@ fn drain_encoded_output(
 
 fn send_encoder_eos(codec: &mut MediaCodec) -> Result<(), Error> {
     for _ in 0..5000 {
-        if let Ok(buf) = codec.dequeue_input() {
+        if let Ok(buf) = codec.dequeue_input(0) {
             let mut buf: mediacodec::CodecInputBuffer = buf;
             buf.set_flags(BufferFlag::EndOfStream as u32);
             return Ok(());
@@ -246,19 +245,18 @@ fn drain_encoder_until_eos(
     pkt_tx: &mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
 ) -> Result<(), Error> {
     for _ in 0..5000 {
-        match codec.dequeue_output() {
+        match codec.dequeue_output(1000) {
             Ok(out) => {
                 let out: mediacodec::CodecOutputBuffer = out;
                 let flags = out.info().flags as i32;
                 if BufferFlag::EndOfStream.is_contained_in(flags) {
                     return Ok(());
                 }
-                // Skip codec config buffers
-                if (flags & 2) != 0 {
+                if BufferFlag::CodecConfig.is_contained_in(flags) {
                     continue;
                 }
                 let info = out.info();
-                let is_key = BufferFlag::Encode.is_contained_in(flags);
+                let is_key = BufferFlag::KeyFrame.is_contained_in(flags);
                 let ts = Duration::from_micros(info.presentation_time_us as u64);
                 let payload_bytes = if let Some(slice) = out.buffer_slice() {
                     bytes::Bytes::copy_from_slice(slice)

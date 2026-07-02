@@ -63,14 +63,14 @@ pub fn create(
     config: AudioDecoderConfig,
 ) -> Result<(AndroidAudioDecoderInput, AndroidAudioDecoderOutput), Error> {
     let mut format =
-        MediaFormat::new().ok_or_else(|| Error::Platform("Failed to create MediaFormat".into()))?;
-    format.set_string("mime", &config.codec.0);
-    format.set_i32("channel-count", config.channel_count as i32);
-    format.set_i32("sample-rate", config.sample_rate as i32);
+        MediaFormat::new().map_err(|_| Error::Platform("Failed to create MediaFormat".into()))?;
+    let _ = format.set_string("mime", &config.codec.0);
+    let _ = format.set_i32("channel-count", config.channel_count as i32);
+    let _ = format.set_i32("sample-rate", config.sample_rate as i32);
 
     let mime = config.codec.0.clone();
     let mut codec = MediaCodec::create_decoder(&mime)
-        .ok_or_else(|| Error::Platform(format!("No audio decoder for {mime}")))?;
+        .map_err(|e| Error::Platform(format!("No audio decoder for {mime}: {e:?}")))?;
 
     codec
         .init(&format, None, 0)
@@ -101,7 +101,7 @@ fn submit_one(
     pkt: &EncodedAudioPacket,
     queue: &std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) -> Result<(), Error> {
-    if let Ok(buf) = codec.dequeue_input() {
+    if let Ok(buf) = codec.dequeue_input(0) {
         let mut buf: CodecInputBuffer = buf;
         let (ptr, cap) = buf.buffer();
         if pkt.payload.len() > cap {
@@ -129,7 +129,7 @@ fn drain_output(
     fallback_channels: u32,
     fallback_sample_rate: u32,
 ) {
-    while let Ok(out_buf) = codec.dequeue_output() {
+    while let Ok(out_buf) = codec.dequeue_output(0) {
         let out_buf: CodecOutputBuffer = out_buf;
         let fmt = out_buf.format();
         let channels = fmt.get_i32("channel-count").map(|v| v as u32).unwrap_or(fallback_channels);
@@ -207,7 +207,7 @@ fn audio_decode_loop(
 
 fn send_audio_eos(codec: &mut MediaCodec) -> Result<(), Error> {
     for _ in 0..5000 {
-        if let Ok(buf) = codec.dequeue_input() {
+        if let Ok(buf) = codec.dequeue_input(0) {
             let mut buf: mediacodec::CodecInputBuffer = buf;
             buf.set_flags(mediacodec::BufferFlag::EndOfStream as u32);
             return Ok(());
@@ -224,7 +224,7 @@ fn drain_audio_until_eos(
     fallback_sample_rate: u32,
 ) -> Result<(), Error> {
     for _ in 0..5000 {
-        match codec.dequeue_output() {
+        match codec.dequeue_output(1000) {
             Ok(out_buf) => {
                 let out_buf: CodecOutputBuffer = out_buf;
                 if mediacodec::BufferFlag::EndOfStream.is_contained_in(out_buf.info().flags as i32) {
