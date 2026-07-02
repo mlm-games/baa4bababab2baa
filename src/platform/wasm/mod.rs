@@ -13,19 +13,6 @@ pub use audio_encoder::{WasmAudioEncoderInput, WasmAudioEncoderOutput};
 pub use video_decoder::{WasmVideoDecoderInput, WasmVideoDecoderOutput};
 pub use video_encoder::{WasmVideoEncoderInput, WasmVideoEncoderOutput};
 
-/// Map MIME-type codec identifiers to WebCodecs full codec strings.
-/// WebCodecs requires specific codec strings (e.g. "avc1.42001E") not bare MIMEs.
-pub(super) fn mime_to_codec_strings(mime: &str) -> Vec<&str> {
-    match mime {
-        "video/avc" => vec!["avc1.42001E", "avc1.4D001E", "avc1.64001E"],
-        "video/hevc" => vec!["hvc1.1.6.L93.B0", "hev1.1.6.L93.B0"],
-        "video/av01" => vec!["av01.0.04M.08"],
-        "video/vp9" => vec!["vp09.00.10.08"],
-        "video/vp8" => vec!["vp8"],
-        _ => vec![mime],
-    }
-}
-
 pub struct WebCodecsHost;
 
 impl WebCodecsHost {

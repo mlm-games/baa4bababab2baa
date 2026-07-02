@@ -1,9 +1,58 @@
+use std::fmt;
+
 use bytes::Bytes;
 
 use crate::types::common::{SampleFormat, Timestamp};
 
-#[derive(Debug, Clone)]
-pub struct AudioCodecId(pub String);
+/// An audio codec identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioCodecId {
+    Aac,
+    Opus,
+    Mp3,
+    Vorbis,
+    Flac,
+    /// Raw MIME string for codecs not covered above.
+    Other(String),
+}
+
+impl AudioCodecId {
+    /// Create from a MIME-type string.
+    pub fn from_mime(mime: &str) -> Self {
+        match mime {
+            "audio/mp4a-latm" | "audio/aac" => AudioCodecId::Aac,
+            "audio/opus" => AudioCodecId::Opus,
+            "audio/mpeg" => AudioCodecId::Mp3,
+            "audio/vorbis" => AudioCodecId::Vorbis,
+            "audio/flac" => AudioCodecId::Flac,
+            other => AudioCodecId::Other(other.to_string()),
+        }
+    }
+
+    /// Return the canonical MIME string for this codec.
+    pub fn to_mime(&self) -> &str {
+        match self {
+            AudioCodecId::Aac => "audio/mp4a-latm",
+            AudioCodecId::Opus => "audio/opus",
+            AudioCodecId::Mp3 => "audio/mpeg",
+            AudioCodecId::Vorbis => "audio/vorbis",
+            AudioCodecId::Flac => "audio/flac",
+            AudioCodecId::Other(s) => s.as_str(),
+        }
+    }
+}
+
+impl fmt::Display for AudioCodecId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.to_mime())
+    }
+}
+
+impl From<&str> for AudioCodecId {
+    fn from(s: &str) -> Self {
+        AudioCodecId::from_mime(s)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AudioEncoderConfig {
@@ -16,7 +65,7 @@ pub struct AudioEncoderConfig {
 impl Default for AudioEncoderConfig {
     fn default() -> Self {
         Self {
-            codec: AudioCodecId("audio/mp4a-latm".into()),
+            codec: AudioCodecId::Aac,
             sample_rate: 48_000,
             channels: 2,
             bitrate: None,
@@ -35,7 +84,7 @@ pub struct AudioDecoderConfig {
 impl Default for AudioDecoderConfig {
     fn default() -> Self {
         Self {
-            codec: AudioCodecId("audio/mp4a-latm".into()),
+            codec: AudioCodecId::Aac,
             channel_count: 2,
             sample_rate: 48_000,
             description: None,

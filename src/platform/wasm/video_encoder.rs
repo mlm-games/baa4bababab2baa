@@ -13,10 +13,12 @@ use crate::{
 };
 
 pub(super) fn to_wc_config(cfg: &VideoEncoderConfig) -> WcVideoEncoderConfig {
-    let codec = super::mime_to_codec_strings(&cfg.codec.0)
+    let codec = cfg
+        .codec
+        .to_webcodecs_strings()
         .into_iter()
         .next()
-        .unwrap_or(&cfg.codec.0)
+        .unwrap_or(cfg.codec.to_mime())
         .to_string();
 
     let mut wc = WcVideoEncoderConfig::new(
@@ -123,7 +125,7 @@ impl WasmVideoEncoderOutput {
     fn build_packet(&mut self, frame: EncodedFrame) -> EncodedVideoPacket {
         if let Some(wc_cfg) = self.inner.config() {
             self.decoder_cfg = Some(VideoDecoderConfig {
-                codec: crate::types::VideoCodecId(wc_cfg.codec.clone()),
+                codec: crate::types::VideoCodecId::from_mime(&wc_cfg.codec),
                 resolution: wc_cfg
                     .resolution
                     .map(|d| Dimensions::new(d.width, d.height)),

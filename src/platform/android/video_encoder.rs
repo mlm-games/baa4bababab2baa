@@ -77,7 +77,7 @@ pub fn create(
     let mut format =
         MediaFormat::new().map_err(|_| Error::Platform("Failed to create MediaFormat".into()))?;
 
-    let _ = format.set_string("mime", &config.codec.0);
+    let _ = format.set_string("mime", config.codec.to_mime());
     let _ = format.set_i32("width", config.dimensions.width as i32);
     let _ = format.set_i32("height", config.dimensions.height as i32);
     if let Some(br) = config.bitrate {
@@ -89,7 +89,7 @@ pub fn create(
     let _ = format.set_i32("i-frame-interval", 1);
     let _ = format.set_i32("color-format", 21); // COLOR_FormatYUV420SemiPlanar (NV12)
 
-    let mime = config.codec.0.clone();
+    let mime = config.codec.to_mime().to_string();
     let mut codec = MediaCodec::create_encoder(&mime)
         .map_err(|e| Error::Platform(format!("No encoder for {mime}: {e:?}")))?;
 

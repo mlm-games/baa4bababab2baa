@@ -10,7 +10,7 @@ use crate::{
 
 pub(super) fn to_wc_config(cfg: &AudioEncoderConfig) -> WcAudioEncoderConfig {
     WcAudioEncoderConfig {
-        codec: cfg.codec.0.clone(),
+        codec: cfg.codec.to_string(),
         channel_count: Some(cfg.channels),
         sample_rate: Some(cfg.sample_rate),
         bitrate: cfg.bitrate,
@@ -90,7 +90,7 @@ impl AudioEncoderOutput for WasmAudioEncoderOutput {
 
         if let Some(wc_cfg) = self.inner.config() {
             self.decoder_cfg = Some(AudioDecoderConfig {
-                codec: crate::types::AudioCodecId(wc_cfg.codec.clone()),
+                codec: crate::types::AudioCodecId::from_mime(&wc_cfg.codec),
                 channel_count: wc_cfg.channel_count,
                 sample_rate: wc_cfg.sample_rate,
                 description: wc_cfg.description.clone(),

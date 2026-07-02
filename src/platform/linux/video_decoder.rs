@@ -92,7 +92,7 @@ impl VideoDecoderOutput for CrosVideoDecoderOutput {
 pub fn create(
     config: VideoDecoderConfig,
 ) -> Result<(CrosVideoDecoderInput, CrosVideoDecoderOutput), Error> {
-    let codec_string = config.codec.0;
+    let codec = config.codec.clone();
     let fmt = codec_to_fmt(&codec_string).map_err(|e| Error::Platform(e))?;
 
     // Open VA display and validate codec support synchronously (for easier fallback)
@@ -113,7 +113,7 @@ pub fn create(
     let queue = Arc::new(AtomicU32::new(0));
 
     let queue2 = queue.clone();
-    thread::spawn(move || worker_loop(cmd_rx, frame_tx, queue2, codec_string, va_display));
+    thread::spawn(move || worker_loop(cmd_rx, frame_tx, queue2, codec, va_display));
 
     Ok((
         CrosVideoDecoderInput { tx: cmd_tx, queue },
@@ -170,14 +170,14 @@ fn make_decoder(
     }
 }
 
-fn codec_to_fmt(codec: &str) -> Result<EncodedFormat, String> {
+fn codec_to_fmt(codec: &crate::types::VideoCodecId) -> Result<EncodedFormat, String> {
     match codec {
-        "video/avc" | "video/h264" => Ok(EncodedFormat::H264),
-        "video/hevc" | "video/h265" => Ok(EncodedFormat::H265),
-        "video/vp8" => Ok(EncodedFormat::VP8),
-        "video/vp9" => Ok(EncodedFormat::VP9),
-        "video/av01" | "video/av1" => Ok(EncodedFormat::AV1),
-        _ => Err(format!("unsupported codec string: {codec}")),
+        crate::types::VideoCodecId::H264 { .. } => Ok(EncodedFormat::H264),
+        crate::types::VideoCodecId::Hevc => Ok(EncodedFormat::H265),
+        crate::types::VideoCodecId::Vp8 => Ok(EncodedFormat::VP8),
+        crate::types::VideoCodecId::Vp9 => Ok(EncodedFormat::VP9),
+        crate::types::VideoCodecId::Av1 => Ok(EncodedFormat::AV1),
+        crate::types::VideoCodecId::Other(s) => Err(format!("unsupported codec: {s}")),
     }
 }
 
@@ -185,7 +185,7 @@ fn worker_loop(
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     frame_tx: mpsc::UnboundedSender<Result<VideoFrame, Error>>,
     queue: Arc<AtomicU32>,
-    codec_string: String,
+    codec: crate::types::VideoCodecId,
     va_display: Arc<libva::Display>,
 ) {
     let mut frame_queue: Vec<GenericDmaVideoFrame> = Vec::new();
@@ -245,7 +245,7 @@ fn worker_loop(
                 queue.fetch_sub(1, Ordering::Relaxed);
 
                 let res = (|| -> Result<(), Error> {
-                    let fmt = codec_to_fmt(&codec_string)?;
+                    let fmt = codec_to_fmt(&codec)?;
 
                     if decoder.is_none() {
                         decoder = Some(make_decoder(fmt, &va_display)?);

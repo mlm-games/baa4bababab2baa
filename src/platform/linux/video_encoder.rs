@@ -17,8 +17,8 @@ use crate::{
     error::Error,
     traits::{VideoEncoderInput, VideoEncoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoEncoderConfig,
-        VideoFrame, VideoPlanes,
+        Dimensions, EncodedVideoPacket, PixelFormat, VideoCodecId, VideoDecoderConfig,
+        VideoEncoderConfig, VideoFrame, VideoPlanes,
     },
 };
 
@@ -173,10 +173,9 @@ fn init_encoder_inner(config: &VideoEncoderConfig) -> Result<EncoderInit, Error>
 pub fn create(
     config: VideoEncoderConfig,
 ) -> Result<(CrosVideoEncoderInput, CrosVideoEncoderOutput), Error> {
-    let codec = config.codec.0.as_str();
     if !matches!(
-        codec,
-        "video/avc" | "video/h264" | "video/vp9" | "video/av01" | "video/av1"
+        config.codec,
+        VideoCodecId::H264 { .. } | VideoCodecId::Vp9 | VideoCodecId::Av1
     ) {
         return Err(Error::Unsupported);
     }
@@ -328,7 +327,7 @@ fn worker_loop(
             polled = true;
 
             let ts = Duration::from_micros(coded.metadata.timestamp);
-            let keyframe = keyframe_from_bitstream(&coded.bitstream, &config.codec.0)
+            let keyframe = keyframe_from_bitstream(&coded.bitstream, &config.codec)
                 .unwrap_or(coded.metadata.force_keyframe);
 
             let pkt = EncodedVideoPacket {
@@ -357,7 +356,7 @@ fn worker_loop(
                 match encoder.poll() {
                     Ok(Some(coded)) => {
                         let ts = Duration::from_micros(coded.metadata.timestamp);
-                        let keyframe = keyframe_from_bitstream(&coded.bitstream, &config.codec.0)
+                        let keyframe = keyframe_from_bitstream(&coded.bitstream, &config.codec)
                             .unwrap_or(coded.metadata.force_keyframe);
                         let pkt = EncodedVideoPacket {
                             payload: Bytes::from(coded.bitstream),
@@ -414,8 +413,8 @@ fn create_vaapi_encoder(
 
     let low_power = config.latency_optimized.unwrap_or(false);
 
-    match config.codec.0.as_str() {
-        "video/avc" | "video/h264" => {
+    match &config.codec {
+        VideoCodecId::H264 { .. } => {
             use cros_codecs::codec::h264::parser::{Level, Profile};
             use cros_codecs::encoder::{RateControl, Tunings};
 
@@ -458,12 +457,12 @@ fn create_vaapi_encoder(
             Ok(Box::new(enc))
         }
 
-        "video/vp9" | "video/av01" | "video/av1" => {
+        VideoCodecId::Vp9 | VideoCodecId::Av1 => {
             // TODO: VP9 and AV1 encoders need new_native_vaapi upstream
             return Err(Error::Unsupported);
         }
 
-        _ => Err(Error::Unsupported),
+        VideoCodecId::Hevc | VideoCodecId::Vp8 | VideoCodecId::Other(_) => Err(Error::Unsupported),
     }
 }
 
@@ -580,18 +579,18 @@ fn upload_nv12(
     Ok(())
 }
 
-fn keyframe_from_bitstream(data: &[u8], codec: &str) -> Option<bool> {
+fn keyframe_from_bitstream(data: &[u8], codec: &VideoCodecId) -> Option<bool> {
     if data.is_empty() {
         return None;
     }
     match codec {
-        "video/avc" | "video/h264" => h264_has_idr(data),
+        VideoCodecId::H264 { .. } => h264_has_idr(data),
 
-        "video/hevc" | "video/h265" => h265_is_idr(data),
+        VideoCodecId::Hevc => h265_is_idr(data),
 
-        "video/vp9" => vp9_is_keyframe(data),
+        VideoCodecId::Vp9 => vp9_is_keyframe(data),
 
-        "video/av1" | "video/av01" => av1_is_keyframe(data),
+        VideoCodecId::Av1 => av1_is_keyframe(data),
 
         _ => None,
     }

@@ -53,9 +53,12 @@ impl CrosCodecsHost {
         config: &VideoDecoderConfig,
     ) -> Result<bool, Error> {
         Ok(matches!(
-            config.codec.0.as_str(),
-            "video/avc" | "video/h264" | "video/hevc" | "video/h265"
-                | "video/vp8" | "video/vp9" | "video/av01" | "video/av1"
+            config.codec,
+            crate::types::VideoCodecId::H264 { .. }
+                | crate::types::VideoCodecId::Hevc
+                | crate::types::VideoCodecId::Vp8
+                | crate::types::VideoCodecId::Vp9
+                | crate::types::VideoCodecId::Av1
         ))
     }
 
@@ -63,10 +66,7 @@ impl CrosCodecsHost {
         &self,
         config: &VideoEncoderConfig,
     ) -> Result<bool, Error> {
-        Ok(matches!(
-            config.codec.0.as_str(),
-            "video/avc" | "video/h264"
-        ))
+        Ok(matches!(config.codec, crate::types::VideoCodecId::H264 { .. }))
     }
 
     pub async fn is_audio_encoder_supported(

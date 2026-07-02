@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub(super) fn to_wc_config(cfg: &AudioDecoderConfig) -> WcAudioDecoderConfig {
-    let mut wc = WcAudioDecoderConfig::new(&cfg.codec.0, cfg.channel_count, cfg.sample_rate);
+    let mut wc = WcAudioDecoderConfig::new(cfg.codec.to_mime(), cfg.channel_count, cfg.sample_rate);
     if let Some(desc) = &cfg.description {
         wc.description = Some(desc.clone());
     }

@@ -60,11 +60,11 @@ pub fn create(
 ) -> Result<(AndroidAudioDecoderInput, AndroidAudioDecoderOutput), Error> {
     let mut format =
         MediaFormat::new().map_err(|_| Error::Platform("Failed to create MediaFormat".into()))?;
-    let _ = format.set_string("mime", &config.codec.0);
+    let _ = format.set_string("mime", config.codec.to_mime());
     let _ = format.set_i32("channel-count", config.channel_count as i32);
     let _ = format.set_i32("sample-rate", config.sample_rate as i32);
 
-    let mime = config.codec.0.clone();
+    let mime = config.codec.to_mime().to_string();
     let mut codec = MediaCodec::create_decoder(&mime)
         .map_err(|e| Error::Platform(format!("No audio decoder for {mime}: {e:?}")))?;
 

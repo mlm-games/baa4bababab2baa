@@ -11,7 +11,7 @@ use crate::{
 };
 
 pub(super) fn to_wc_config(cfg: &VideoDecoderConfig) -> WcVideoDecoderConfig {
-    let mut wc = WcVideoDecoderConfig::new(&cfg.codec.0);
+    let mut wc = WcVideoDecoderConfig::new(cfg.codec.to_mime());
 
     if let Some(res) = cfg.resolution {
         wc.resolution = Some(web_codecs::Dimensions::new(res.width, res.height));
@@ -143,7 +143,7 @@ impl WasmVideoDecoderOutput {
 pub fn create(
     config: VideoDecoderConfig,
 ) -> Result<(WasmVideoDecoderInput, WasmVideoDecoderOutput), Error> {
-    let candidates = super::mime_to_codec_strings(&config.codec.0);
+    let candidates = config.codec.to_webcodecs_strings();
     let mut last_err = None;
 
     for codec_str in candidates {
@@ -163,6 +163,6 @@ pub fn create(
 
     Err(Error::Platform(format!(
         "No supported codec variant for {:?}: {:?}",
-        config.codec.0, last_err
+        config.codec, last_err
     )))
 }

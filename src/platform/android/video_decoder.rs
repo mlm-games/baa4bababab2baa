@@ -71,7 +71,7 @@ pub fn create(
 ) -> Result<(AndroidVideoDecoderInput, AndroidVideoDecoderOutput), Error> {
     let mut format =
         MediaFormat::new().map_err(|_| Error::Platform("Failed to create MediaFormat".into()))?;
-    let _ = format.set_string("mime", &config.codec.0);
+    let _ = format.set_string("mime", config.codec.to_mime());
 
     if let Some(res) = config.resolution {
         let _ = format.set_i32("width", res.width as i32);
@@ -82,7 +82,7 @@ pub fn create(
         let _ = format.set_buffer("csd-0", desc);
     }
 
-    let mime = config.codec.0.clone();
+    let mime = config.codec.to_mime().to_string();
 
     let mut codec = MediaCodec::create_decoder(&mime)
         .map_err(|e| Error::Platform(format!("No decoder for {mime}: {e:?}")))?;
