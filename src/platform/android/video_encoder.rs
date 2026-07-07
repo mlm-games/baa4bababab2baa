@@ -181,10 +181,10 @@ fn drain_encoded_output(
     decoder_cfg: &Arc<OnceLock<VideoDecoderConfig>>,
     dimensions: Dimensions,
     codec_id: crate::types::VideoCodecId,
-) -> Result<bool, Error> {
-    let mut had_output = false;
-    while let Ok(out) = codec.dequeue_output(0) {
-        had_output = true;
+    timeout_us: i64,
+) -> Result<u32, Error> {
+    let mut count = 0u32;
+    while let Ok(out) = codec.dequeue_output(timeout_us) {
         let out_buf: mediacodec::CodecOutputBuffer = out;
         let info = out_buf.info();
         let flags = info.flags as u32;
@@ -224,8 +224,9 @@ fn drain_encoded_output(
         if pkt_tx.send(Ok(pkt)).is_err() {
             return Err(Error::Dropped);
         }
+        count += 1;
     }
-    Ok(had_output)
+    Ok(count)
 }
 
 fn handle_flush(
@@ -233,8 +234,13 @@ fn handle_flush(
     pending: &mut VecDeque<(VideoFrame, Option<bool>)>,
     queue: &Arc<AtomicU32>,
     pkt_tx: &mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
+    decoder_cfg: &Arc<OnceLock<VideoDecoderConfig>>,
+    dimensions: Dimensions,
+    codec_id: crate::types::VideoCodecId,
 ) -> Result<(), Error> {
     drain_pending_frames(codec, pending, queue, pkt_tx)?;
+    // Flush: drain any pending output before sending EOS
+    let _ = drain_encoded_output(codec, pkt_tx, decoder_cfg, dimensions, codec_id.clone(), 0);
     cmd::send_eos(codec)?;
     cmd::drain_until_eos(codec, |out| {
         let flags = out.info().flags as u32;
@@ -271,6 +277,8 @@ fn encode_loop(
     codec_id: crate::types::VideoCodecId,
 ) {
     let mut pending: VecDeque<(VideoFrame, Option<bool>)> = VecDeque::new();
+    // Track frames submitted to MediaCodec but not yet returned as output.
+    let mut in_flight: u32 = 0;
     let mut idle = true;
 
     loop {
@@ -281,7 +289,7 @@ fn encode_loop(
                     pending.push_back((frame, keyframe));
                 }
                 Some(Cmd::Flush(done)) => {
-                    let res = handle_flush(&mut codec, &mut pending, &queue, &pkt_tx);
+                    let res = handle_flush(&mut codec, &mut pending, &queue, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
                     let _ = done.send(res);
                 }
                 Some(Cmd::Close) | None => {
@@ -291,6 +299,7 @@ fn encode_loop(
                         &decoder_cfg,
                         dimensions,
                         codec_id.clone(),
+                        0,
                     );
                     queue.store(0, Ordering::Relaxed);
                     return;
@@ -302,7 +311,7 @@ fn encode_loop(
             match cmd {
                 Cmd::Item((frame, keyframe)) => pending.push_back((frame, keyframe)),
                 Cmd::Flush(done) => {
-                    let res = handle_flush(&mut codec, &mut pending, &queue, &pkt_tx);
+                    let res = handle_flush(&mut codec, &mut pending, &queue, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
                     let _ = done.send(res);
                 }
                 Cmd::Close => {
@@ -312,6 +321,7 @@ fn encode_loop(
                         &decoder_cfg,
                         dimensions,
                         codec_id.clone(),
+                        0,
                     );
                     queue.store(0, Ordering::Relaxed);
                     return;
@@ -319,31 +329,35 @@ fn encode_loop(
             }
         }
 
-        let had_pending = !pending.is_empty();
+        let old_pending = pending.len();
         let _ = drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx);
-        let had_output = drain_encoded_output(
+        in_flight = in_flight.saturating_add((old_pending - pending.len()) as u32);
+
+        let frame_count = drain_encoded_output(
             &mut codec,
             &pkt_tx,
             &decoder_cfg,
             dimensions,
             codec_id.clone(),
+            if in_flight > 0 { 1000 } else { 0 },
         )
-        .unwrap_or(false);
+        .unwrap_or(0);
+        in_flight = in_flight.saturating_sub(frame_count);
 
-        if cmd_rx.is_closed() && pending.is_empty() {
+        if cmd_rx.is_closed() && pending.is_empty() && in_flight == 0 {
             let _ = drain_encoded_output(
                 &mut codec,
                 &pkt_tx,
                 &decoder_cfg,
                 dimensions,
                 codec_id.clone(),
+                0,
             );
             queue.store(0, Ordering::Relaxed);
             return;
         }
 
-        // Don't go idle if we just submitted work or had output
-        idle = !had_pending && !had_output && pending.is_empty();
+        idle = pending.is_empty() && in_flight == 0;
         if !idle {
             thread::sleep(Duration::from_millis(1));
         }
