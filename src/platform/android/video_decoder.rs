@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::thread;
 
-use mediacodec::{BufferFlag, MediaCodec, MediaFormat};
+use mediacodec::{BufferFlag, DequeueOutputError, MediaCodec, MediaFormat};
 use tokio::sync::{mpsc, oneshot};
 
 use super::cmd::{self, Cmd};
@@ -240,19 +240,36 @@ fn drain_output(
     codec: &mut MediaCodec,
     frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
 ) {
-    while let Ok(out) = codec.dequeue_output(0) {
-        let out_buf: mediacodec::CodecOutputBuffer = out;
-        if BufferFlag::EndOfStream.is_contained_in(out_buf.info().flags as u32) {
-            continue;
-        }
-        match output_to_frame(&out_buf) {
-            Ok(frame) => {
-                if frame_tx.send(Ok(frame)).is_err() {
-                    return;
+    loop {
+        match codec.dequeue_output(0) {
+            Ok(out) => {
+                let out_buf: mediacodec::CodecOutputBuffer = out;
+                let flags = out_buf.info().flags;
+                if BufferFlag::EndOfStream.is_contained_in(flags) {
+                    continue;
+                }
+                if BufferFlag::CodecConfig.is_contained_in(flags) {
+                    continue;
+                }
+                match output_to_frame(&out_buf) {
+                    Ok(frame) => {
+                        if frame_tx.send(Ok(frame)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = frame_tx.send(Err(e));
+                        return;
+                    }
                 }
             }
-            Err(e) => {
-                let _ = frame_tx.send(Err(e));
+            Err(DequeueOutputError::TryAgainLater) => break,
+            Err(DequeueOutputError::OutputFormatChanged)
+            | Err(DequeueOutputError::OutputBuffersChanged) => {
+                // Normal lifecycle events; continue polling.
+            }
+            Err(DequeueOutputError::CodecError(e)) => {
+                let _ = frame_tx.send(Err(Error::Platform(format!("codec error: {e:?}"))));
                 return;
             }
         }
@@ -277,7 +294,9 @@ fn decode_loop(
                         if pending.is_empty() {
                             break;
                         }
+                        drain_output(&mut codec, &frame_tx);
                         submit_pending(&mut codec, &mut pending, &queue)?;
+                        drain_output(&mut codec, &frame_tx);
                         if !pending.is_empty() {
                             thread::sleep(std::time::Duration::from_millis(1));
                         }
