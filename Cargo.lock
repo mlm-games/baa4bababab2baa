@@ -629,7 +629,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 [[package]]
 name = "mediacodec"
 version = "0.1.5"
-source = "git+https://github.com/mlm-games/rust_mediacodec?branch=main#0c2788abf9360ccf2593985d113aad806b0796f3"
+source = "git+https://github.com/mlm-games/rust_mediacodec?branch=main#bbfa3fdcd4b05ba1a7c9349304da0881b66bb359"
 dependencies = [
  "android_logger",
  "jni",

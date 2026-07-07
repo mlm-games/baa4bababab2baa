@@ -269,6 +269,7 @@ fn worker_loop(
         }
 
         // Submit pending frames
+        let had_pending = !pending.is_empty();
         while let Some((frame, force_keyframe)) = pending.pop_front() {
             let Some(handle) = pool.get_surface() else {
                 pending.push_front((frame, force_keyframe));
@@ -391,7 +392,8 @@ fn worker_loop(
         }
 
         // If we didn't poll anything (no output ready) and nothing is pending, go idle.
-        idle = !polled && pending.is_empty() && flushing.is_empty();
+        // NOTE: Don't go idle if we just submitted work, the HW may still be processing.
+        idle = !had_pending && !polled && pending.is_empty() && flushing.is_empty();
         if !idle {
             // Avoids tight loop when surfaces aren't available
             thread::sleep(Duration::from_millis(1));

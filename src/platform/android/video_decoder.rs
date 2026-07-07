@@ -206,14 +206,14 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
             let uv_stride = stride / 2;
             let uv_h = h / 2;
             for row in 0..uv_h {
-                let src_start = y_size + (uv_crop_top(row)) * uv_stride;
+                let src_start = y_size + (uv_crop_top(row as u32)) * uv_stride;
                 let dst_start = row * (w / 2);
                 out_u[dst_start..dst_start + w / 2]
                     .copy_from_slice(&raw[src_start..src_start + w / 2]);
             }
             // V plane
             for row in 0..uv_h {
-                let src_start = y_size + u_size + (uv_crop_top(row)) * uv_stride;
+                let src_start = y_size + u_size + (uv_crop_top(row as u32)) * uv_stride;
                 let dst_start = row * (w / 2);
                 out_v[dst_start..dst_start + w / 2]
                     .copy_from_slice(&raw[src_start..src_start + w / 2]);
@@ -242,7 +242,7 @@ fn drain_output(
 ) {
     while let Ok(out) = codec.dequeue_output(0) {
         let out_buf: mediacodec::CodecOutputBuffer = out;
-        if BufferFlag::EndOfStream.is_contained_in(out_buf.info().flags as i32) {
+        if BufferFlag::EndOfStream.is_contained_in(out_buf.info().flags as u32) {
             continue;
         }
         match output_to_frame(&out_buf) {

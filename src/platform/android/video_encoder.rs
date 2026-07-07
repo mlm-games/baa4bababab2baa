@@ -106,9 +106,11 @@ pub fn create(
     let queue2 = queue.clone();
     let decoder_cfg = Arc::new(OnceLock::new());
     let decoder_cfg2 = decoder_cfg.clone();
+    let dims = config.dimensions;
+    let codec_id = config.codec.clone();
 
     thread::spawn(move || {
-        encode_loop(codec, cmd_rx, pkt_tx, queue2, decoder_cfg2, config.dimensions, config.codec.clone());
+        encode_loop(codec, cmd_rx, pkt_tx, queue2, decoder_cfg2, dims, codec_id);
     });
 
     Ok((
@@ -130,7 +132,8 @@ fn drain_pending_frames(
     pending: &mut VecDeque<(VideoFrame, Option<bool>)>,
     queue: &Arc<AtomicU32>,
     _pkt_tx: &mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
+    let mut submitted = false;
     while let Some((frame, keyframe)) = pending.pop_front() {
         if let Ok(buf) = codec.dequeue_input(0) {
             let mut buf: mediacodec::CodecInputBuffer = buf;
@@ -155,12 +158,13 @@ fn drain_pending_frames(
                 buf.set_flags(BufferFlag::KeyFrame as u32);
             }
             queue.fetch_sub(1, Ordering::Relaxed);
+            submitted = true;
         } else {
             pending.push_front((frame, keyframe));
             break;
         }
     }
-    Ok(())
+    Ok(submitted)
 }
 
 fn drain_encoded_output(
@@ -169,11 +173,13 @@ fn drain_encoded_output(
     decoder_cfg: &Arc<OnceLock<VideoDecoderConfig>>,
     dimensions: Dimensions,
     codec_id: crate::types::VideoCodecId,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
+    let mut had_output = false;
     while let Ok(out) = codec.dequeue_output(0) {
+        had_output = true;
         let out_buf: mediacodec::CodecOutputBuffer = out;
         let info = out_buf.info();
-        let flags = info.flags as i32;
+        let flags = info.flags as u32;
         let is_key = BufferFlag::KeyFrame.is_contained_in(flags);
         let ts = Duration::from_micros(info.presentation_time_us as u64);
 
@@ -211,7 +217,7 @@ fn drain_encoded_output(
             return Err(Error::Dropped);
         }
     }
-    Ok(())
+    Ok(had_output)
 }
 
 fn encode_loop(
@@ -226,6 +232,56 @@ fn encode_loop(
     let mut pending: VecDeque<(VideoFrame, Option<bool>)> = VecDeque::new();
 
     loop {
+        // Process all available commands without blocking.
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                Cmd::Item((frame, keyframe)) => pending.push_back((frame, keyframe)),
+                Cmd::Flush(done) => {
+                    let res = (|| -> Result<(), Error> {
+                        drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx)?;
+                        cmd::send_eos(&mut codec)?;
+                        cmd::drain_until_eos(&mut codec, |out| {
+                            let flags = out.info().flags as u32;
+                            if BufferFlag::CodecConfig.is_contained_in(flags) {
+                                return Ok(());
+                            }
+                            let is_key = BufferFlag::KeyFrame.is_contained_in(flags);
+                            let ts = Duration::from_micros(out.info().presentation_time_us as u64);
+                            let payload_bytes = if let Some(slice) = out.buffer_slice() {
+                                bytes::Bytes::copy_from_slice(slice)
+                            } else {
+                                bytes::Bytes::new()
+                            };
+                            let pkt = EncodedVideoPacket {
+                                payload: payload_bytes,
+                                timestamp: ts,
+                                keyframe: is_key,
+                            };
+                            pkt_tx.send(Ok(pkt)).map_err(|_| Error::Dropped)
+                        })?;
+                        codec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
+                        Ok(())
+                    })();
+                    let _ = done.send(res);
+                }
+                Cmd::Close => {
+                    let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
+                    queue.store(0, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+
+        let _ = drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx);
+        let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
+
+        if cmd_rx.is_closed() && pending.is_empty() {
+            let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
+            queue.store(0, Ordering::Relaxed);
+            return;
+        }
+
+        // Idle: wait for next command.
         match cmd_rx.blocking_recv() {
             Some(Cmd::Item((frame, keyframe))) => pending.push_back((frame, keyframe)),
             Some(Cmd::Flush(done)) => {
@@ -233,7 +289,7 @@ fn encode_loop(
                     drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx)?;
                     cmd::send_eos(&mut codec)?;
                     cmd::drain_until_eos(&mut codec, |out| {
-                        let flags = out.info().flags as i32;
+                        let flags = out.info().flags as u32;
                         if BufferFlag::CodecConfig.is_contained_in(flags) {
                             return Ok(());
                         }

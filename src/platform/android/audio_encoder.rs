@@ -142,7 +142,7 @@ fn drain_encoded_output(
         let is_key = false;
         let ts = std::time::Duration::from_micros(info.presentation_time_us as u64);
 
-        if BufferFlag::EndOfStream.is_contained_in(info.flags as i32) {
+        if BufferFlag::EndOfStream.is_contained_in(info.flags as u32) {
             continue;
         }
 
@@ -186,11 +186,11 @@ fn audio_encode_loop(
                         } else {
                             bytes::Bytes::new()
                         };
-        let pkt = EncodedAudioPacket {
-            payload: payload_bytes,
-            timestamp: ts,
-            keyframe: true,
-        };
+                        let pkt = EncodedAudioPacket {
+                            payload,
+                            timestamp: ts,
+                            keyframe: true,
+                        };
                         pkt_tx.send(Ok(pkt)).map_err(|_| Error::Dropped)
                     })?;
                     codec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;

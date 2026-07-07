@@ -36,7 +36,7 @@ where
             Ok(out) => {
                 consecutive_empty = 0;
                 let out: CodecOutputBuffer = out;
-                if BufferFlag::EndOfStream.is_contained_in(out.info().flags as i32) {
+                if BufferFlag::EndOfStream.is_contained_in(out.info().flags as u32) {
                     return Ok(());
                 }
                 on_output(out)?;
