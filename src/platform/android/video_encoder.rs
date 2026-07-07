@@ -175,54 +175,123 @@ fn drain_pending_frames(
     Ok(submitted)
 }
 
+fn send_encoded_packet(
+    pkt_tx: &mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
+    info: &mediacodec::BufferInfo,
+    payload: &[u8],
+    codec_config_pending: &mut Option<Vec<u8>>,
+    first_packet_sent: &mut bool,
+) -> Result<(), Error> {
+    let is_key = BufferFlag::KeyFrame.is_contained_in(info.flags);
+    let ts = Duration::from_micros(info.presentation_time_us as u64);
+
+    let mut data = payload.to_vec();
+    if !*first_packet_sent {
+        *first_packet_sent = true;
+        if let Some(config) = &*codec_config_pending {
+            let mut combined = Vec::with_capacity(config.len() + data.len());
+            combined.extend_from_slice(config);
+            combined.extend_from_slice(&data);
+            data = combined;
+        }
+    }
+
+    let pkt = EncodedVideoPacket {
+        payload: bytes::Bytes::from(data),
+        timestamp: ts,
+        keyframe: is_key,
+    };
+    pkt_tx.send(Ok(pkt)).map_err(|_| Error::Dropped)?;
+    Ok(())
+}
+
+fn handle_flush(
+    codec: &mut MediaCodec,
+    pending: &mut VecDeque<(VideoFrame, Option<bool>)>,
+    queue: &Arc<AtomicU32>,
+    pkt_tx: &mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
+    codec_config_pending: &mut Option<Vec<u8>>,
+    first_packet_sent: &mut bool,
+) -> Result<(), Error> {
+    let _ = drain_pending_frames(codec, pending, queue, pkt_tx)?;
+    cmd::send_eos(codec)?;
+    cmd::drain_until_eos(codec, |out| {
+        let flags = out.info().flags;
+        if BufferFlag::CodecConfig.is_contained_in(flags) {
+            if let Some(slice) = out.buffer_slice() {
+                *codec_config_pending = Some(slice.to_vec());
+            }
+            return Ok(());
+        }
+        let payload = if let Some(slice) = out.buffer_slice() {
+            slice
+        } else {
+            &[]
+        };
+        send_encoded_packet(pkt_tx, out.info(), payload, codec_config_pending, first_packet_sent)
+    })?;
+    codec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
+    Ok(())
+}
+
 fn drain_encoded_output(
     codec: &mut MediaCodec,
     pkt_tx: &mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
     decoder_cfg: &Arc<OnceLock<VideoDecoderConfig>>,
     dimensions: Dimensions,
     codec_id: crate::types::VideoCodecId,
+    codec_config_pending: &mut Option<Vec<u8>>,
+    first_packet_sent: &mut bool,
 ) -> Result<bool, Error> {
+    use mediacodec::DequeueOutputError;
     let mut had_output = false;
-    while let Ok(out) = codec.dequeue_output(0) {
-        had_output = true;
-        let out_buf: mediacodec::CodecOutputBuffer = out;
-        let info = out_buf.info();
-        let flags = info.flags as u32;
-        let is_key = BufferFlag::KeyFrame.is_contained_in(flags);
-        let ts = Duration::from_micros(info.presentation_time_us as u64);
+    loop {
+        match codec.dequeue_output(0) {
+            Ok(out) => {
+                let out_buf: mediacodec::CodecOutputBuffer = out;
+                let info = out_buf.info();
+                let flags = info.flags;
 
-        if BufferFlag::EndOfStream.is_contained_in(flags) {
-            continue;
-        }
-        if BufferFlag::CodecConfig.is_contained_in(flags) {
-            if decoder_cfg.get().is_none() {
-                if let Some(slice) = out_buf.buffer_slice() {
-                    let data = slice.to_vec();
-                    let _ = decoder_cfg.set(VideoDecoderConfig {
-                        codec: codec_id.clone(),
-                        resolution: Some(Dimensions::new(dimensions.width, dimensions.height)),
-                        description: Some(bytes::Bytes::from(data)),
-                        hardware_acceleration: None,
-                    });
+                if BufferFlag::EndOfStream.is_contained_in(flags) {
+                    continue;
                 }
+                if BufferFlag::CodecConfig.is_contained_in(flags) {
+                    if let Some(slice) = out_buf.buffer_slice() {
+                        let data = slice.to_vec();
+                        *codec_config_pending = Some(data.clone());
+                        if decoder_cfg.get().is_none() {
+                            let _ = decoder_cfg.set(VideoDecoderConfig {
+                                codec: codec_id.clone(),
+                                resolution: Some(Dimensions::new(
+                                    dimensions.width,
+                                    dimensions.height,
+                                )),
+                                description: Some(bytes::Bytes::from(data)),
+                                hardware_acceleration: None,
+                            });
+                        }
+                    }
+                    continue;
+                }
+
+                let payload = if let Some(slice) = out_buf.buffer_slice() {
+                    slice
+                } else {
+                    &[]
+                };
+
+                had_output = true;
+                send_encoded_packet(pkt_tx, &info, payload, codec_config_pending, first_packet_sent)?;
             }
-            continue;
-        }
-
-        let payload_bytes = if let Some(slice) = out_buf.buffer_slice() {
-            bytes::Bytes::copy_from_slice(slice)
-        } else {
-            bytes::Bytes::new()
-        };
-
-        let pkt = EncodedVideoPacket {
-            payload: payload_bytes,
-            timestamp: ts,
-            keyframe: is_key,
-        };
-
-        if pkt_tx.send(Ok(pkt)).is_err() {
-            return Err(Error::Dropped);
+            Err(DequeueOutputError::TryAgainLater) => break,
+            Err(DequeueOutputError::OutputFormatChanged)
+            | Err(DequeueOutputError::OutputBuffersChanged) => {
+                // Normal encoder lifecycle events; format/buffers already refreshed
+                // by the wrapper. Continue polling.
+            }
+            Err(DequeueOutputError::CodecError(e)) => {
+                return Err(Error::Platform(format!("codec error: {e:?}")));
+            }
         }
     }
     Ok(had_output)
@@ -238,102 +307,61 @@ fn encode_loop(
     codec_id: crate::types::VideoCodecId,
 ) {
     let mut pending: VecDeque<(VideoFrame, Option<bool>)> = VecDeque::new();
+    let mut codec_config_pending: Option<Vec<u8>> = None;
+    let mut first_packet_sent = false;
+    let mut work_pending = false;
 
     loop {
-        // Process all available commands without blocking.
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                Cmd::Item((frame, keyframe)) => pending.push_back((frame, keyframe)),
-                Cmd::Flush(done) => {
-                    let res = (|| -> Result<(), Error> {
-                        drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx)?;
-                        cmd::send_eos(&mut codec)?;
-                        cmd::drain_until_eos(&mut codec, |out| {
-                            let flags = out.info().flags as u32;
-                            if BufferFlag::CodecConfig.is_contained_in(flags) {
-                                return Ok(());
-                            }
-                            let is_key = BufferFlag::KeyFrame.is_contained_in(flags);
-                            let ts = Duration::from_micros(out.info().presentation_time_us as u64);
-                            let payload_bytes = if let Some(slice) = out.buffer_slice() {
-                                bytes::Bytes::copy_from_slice(slice)
-                            } else {
-                                bytes::Bytes::new()
-                            };
-                            let pkt = EncodedVideoPacket {
-                                payload: payload_bytes,
-                                timestamp: ts,
-                                keyframe: is_key,
-                            };
-                            pkt_tx.send(Ok(pkt)).map_err(|_| Error::Dropped)
-                        })?;
-                        codec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
-                        Ok(())
-                    })();
+        // Block only when no work is pending and nothing queued
+        if !work_pending && pending.is_empty() {
+            match cmd_rx.blocking_recv() {
+                Some(Cmd::Item((frame, keyframe))) => {
+                    pending.push_back((frame, keyframe));
+                }
+                Some(Cmd::Flush(done)) => {
+                    let res = handle_flush(&mut codec, &mut pending, &queue, &pkt_tx, &mut codec_config_pending, &mut first_packet_sent);
+                    work_pending = false;
                     let _ = done.send(res);
                 }
-                Cmd::Close => {
-                    let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
+                Some(Cmd::Close) | None => {
+                    let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone(), &mut codec_config_pending, &mut first_packet_sent);
                     queue.store(0, Ordering::Relaxed);
                     return;
                 }
             }
         }
 
-        let _ = drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx);
-        let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                Cmd::Item((frame, keyframe)) => pending.push_back((frame, keyframe)),
+                Cmd::Flush(done) => {
+                    let res = handle_flush(&mut codec, &mut pending, &queue, &pkt_tx, &mut codec_config_pending, &mut first_packet_sent);
+                    work_pending = false;
+                    let _ = done.send(res);
+                }
+                Cmd::Close => {
+                    let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone(), &mut codec_config_pending, &mut first_packet_sent);
+                    queue.store(0, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+
+        if drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx).unwrap_or(false) {
+            work_pending = true;
+        }
+        if drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone(), &mut codec_config_pending, &mut first_packet_sent).unwrap_or(false) {
+            work_pending = false;
+        }
 
         if cmd_rx.is_closed() && pending.is_empty() {
-            let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
+            let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone(), &mut codec_config_pending, &mut first_packet_sent);
             queue.store(0, Ordering::Relaxed);
             return;
         }
 
-        // Idle: wait for next command.
-        match cmd_rx.blocking_recv() {
-            Some(Cmd::Item((frame, keyframe))) => pending.push_back((frame, keyframe)),
-            Some(Cmd::Flush(done)) => {
-                let res = (|| -> Result<(), Error> {
-                    drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx)?;
-                    cmd::send_eos(&mut codec)?;
-                    cmd::drain_until_eos(&mut codec, |out| {
-                        let flags = out.info().flags as u32;
-                        if BufferFlag::CodecConfig.is_contained_in(flags) {
-                            return Ok(());
-                        }
-                        let is_key = BufferFlag::KeyFrame.is_contained_in(flags);
-                        let ts = Duration::from_micros(out.info().presentation_time_us as u64);
-                        let payload_bytes = if let Some(slice) = out.buffer_slice() {
-                            bytes::Bytes::copy_from_slice(slice)
-                        } else {
-                            bytes::Bytes::new()
-                        };
-                        let pkt = EncodedVideoPacket {
-                            payload: payload_bytes,
-                            timestamp: ts,
-                            keyframe: is_key,
-                        };
-                        pkt_tx.send(Ok(pkt)).map_err(|_| Error::Dropped)
-                    })?;
-                    codec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
-                    Ok(())
-                })();
-                let _ = done.send(res);
-            }
-            Some(Cmd::Close) | None => {
-                let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
-                queue.store(0, Ordering::Relaxed);
-                return;
-            }
-        }
-
-        let _ = drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx);
-        let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
-
-        if cmd_rx.is_closed() && pending.is_empty() {
-            let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone());
-            queue.store(0, Ordering::Relaxed);
-            return;
+        if work_pending || !pending.is_empty() {
+            thread::sleep(Duration::from_millis(1));
         }
     }
 }
