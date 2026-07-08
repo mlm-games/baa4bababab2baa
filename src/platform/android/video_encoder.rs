@@ -131,6 +131,105 @@ pub fn create(
     ))
 }
 
+fn codec_config_to_annexb(data: &[u8]) -> Vec<u8> {
+    if data.len() < 4 {
+        return data.to_vec();
+    }
+    if data[..4] == [0x00, 0x00, 0x00, 0x01]
+        || data[..3] == [0x00, 0x00, 0x01]
+    {
+        return data.to_vec();
+    }
+    if data.len() >= 23 && data[0] == 1 {
+        let r = parse_hvcc_annexb(data);
+        if !r.is_empty() {
+            return r;
+        }
+    }
+    if data.len() >= 6 && data[0] == 1 {
+        let r = parse_avcc_annexb(data);
+        if !r.is_empty() {
+            return r;
+        }
+    }
+    data.to_vec()
+}
+
+fn parse_avcc_annexb(data: &[u8]) -> Vec<u8> {
+    if data.len() < 6 || data[0] != 1 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut pos = 6usize;
+    let num_sps = (data[5] & 0x1F) as usize;
+    for _ in 0..num_sps {
+        if pos + 2 > data.len() {
+            break;
+        }
+        let len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        if pos + len > data.len() {
+            break;
+        }
+        out.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        out.extend_from_slice(&data[pos..pos + len]);
+        pos += len;
+    }
+    if pos >= data.len() {
+        return out;
+    }
+    let num_pps = data[pos] as usize;
+    pos += 1;
+    for _ in 0..num_pps {
+        if pos + 2 > data.len() {
+            break;
+        }
+        let len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        if pos + len > data.len() {
+            break;
+        }
+        out.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        out.extend_from_slice(&data[pos..pos + len]);
+        pos += len;
+    }
+    out
+}
+
+fn parse_hvcc_annexb(data: &[u8]) -> Vec<u8> {
+    if data.len() < 23 || data[0] != 1 {
+        return Vec::new();
+    }
+    let num_arrays = data[22] as usize;
+    let mut out = Vec::new();
+    let mut pos = 23usize;
+    for _ in 0..num_arrays {
+        if pos >= data.len() {
+            break;
+        }
+        pos += 1;
+        if pos + 2 > data.len() {
+            break;
+        }
+        let num_nalus = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        for _ in 0..num_nalus {
+            if pos + 2 > data.len() {
+                break;
+            }
+            let len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+            pos += 2;
+            if pos + len > data.len() {
+                break;
+            }
+            out.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+            out.extend_from_slice(&data[pos..pos + len]);
+            pos += len;
+        }
+    }
+    out
+}
+
 fn drain_pending_frames(
     codec: &mut MediaCodec,
     pending: &mut VecDeque<(VideoFrame, Option<bool>)>,
@@ -219,7 +318,7 @@ fn handle_flush(
         let flags = out.info().flags;
         if BufferFlag::CodecConfig.is_contained_in(flags) {
             if let Some(slice) = out.buffer_slice() {
-                *codec_config_pending = Some(slice.to_vec());
+                *codec_config_pending = Some(codec_config_to_annexb(slice));
             }
             return Ok(());
         }
@@ -258,7 +357,7 @@ fn drain_encoded_output(
                 if BufferFlag::CodecConfig.is_contained_in(flags) {
                     if let Some(slice) = out_buf.buffer_slice() {
                         let data = slice.to_vec();
-                        *codec_config_pending = Some(data.clone());
+                        *codec_config_pending = Some(codec_config_to_annexb(&data));
                         if decoder_cfg.get().is_none() {
                             let _ = decoder_cfg.set(VideoDecoderConfig {
                                 codec: codec_id.clone(),
