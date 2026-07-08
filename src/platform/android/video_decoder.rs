@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::thread;
 
+use log::info;
 use mediacodec::{BufferFlag, DequeueOutputError, MediaCodec, MediaFormat};
 use tokio::sync::{mpsc, oneshot};
 
@@ -79,8 +80,21 @@ pub fn create(
     }
 
     if let Some(desc) = &config.description {
+        let csd_first: Vec<u8> = desc.iter().take(8).copied().collect();
+        info!("decoder csd-0: {} bytes, first={:02x?}, starts_with_annexb={}",
+            desc.len(), csd_first,
+            desc.len() >= 4 && (desc[..4] == [0x00, 0x00, 0x00, 0x01]));
+        if desc.len() >= 4 && desc[..4] != [0x00, 0x00, 0x00, 0x01] && desc[0] == 1 {
+            info!("decoder csd-0: appears to be hvcC/avcC format (version=1)");
+        }
         let _ = format.set_buffer("csd-0", desc);
     }
+
+    info!("decoder format: mime={}, {}x{}, csd-0 present={}",
+        config.codec.to_mime(),
+        config.resolution.map(|r| r.width).unwrap_or(0),
+        config.resolution.map(|r| r.height).unwrap_or(0),
+        config.description.is_some());
 
     let mime = config.codec.to_mime().to_string();
 
@@ -156,9 +170,10 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
             // Repack: copy visible rows from stride-pitched buffers into tight rows
             let mut out = vec![0u8; w * h * 3 / 2];
             let (out_y, out_uv) = out.split_at_mut(w * h);
+            let crop_l = crop_left as usize;
             // Y plane
             for row in 0..h {
-                let src_start = (crop_top as usize + row) * stride;
+                let src_start = (crop_top as usize + row) * stride + crop_l;
                 let dst_start = row * w;
                 out_y[dst_start..dst_start + w]
                     .copy_from_slice(&raw[src_start..src_start + w]);
@@ -167,7 +182,7 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
             let uv_h = h / 2;
             let uv_crop_top = crop_top as usize / 2;
             for row in 0..uv_h {
-                let src_start = y_size + (uv_crop_top + row) * stride;
+                let src_start = y_size + (uv_crop_top + row) * stride + crop_l;
                 let dst_start = row * w;
                 out_uv[dst_start..dst_start + w]
                     .copy_from_slice(&raw[src_start..src_start + w]);
@@ -195,9 +210,11 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
             let mut out = vec![0u8; w * h * 3 / 2];
             let (out_y, out_uv) = out.split_at_mut(w * h);
             let (out_u, out_v) = out_uv.split_at_mut(w * h / 4);
+            let crop_l = crop_left as usize;
+            let uv_crop_l = crop_l / 2;
             // Y plane
             for row in 0..h {
-                let src_start = (crop_top as usize + row) * stride;
+                let src_start = (crop_top as usize + row) * stride + crop_l;
                 let dst_start = row * w;
                 out_y[dst_start..dst_start + w]
                     .copy_from_slice(&raw[src_start..src_start + w]);
@@ -206,14 +223,14 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
             let uv_stride = stride / 2;
             let uv_h = h / 2;
             for row in 0..uv_h {
-                let src_start = y_size + (uv_crop_top(row as u32)) * uv_stride;
+                let src_start = y_size + (uv_crop_top(row as u32)) * uv_stride + uv_crop_l;
                 let dst_start = row * (w / 2);
                 out_u[dst_start..dst_start + w / 2]
                     .copy_from_slice(&raw[src_start..src_start + w / 2]);
             }
             // V plane
             for row in 0..uv_h {
-                let src_start = y_size + u_size + (uv_crop_top(row as u32)) * uv_stride;
+                let src_start = y_size + u_size + (uv_crop_top(row as u32)) * uv_stride + uv_crop_l;
                 let dst_start = row * (w / 2);
                 out_v[dst_start..dst_start + w / 2]
                     .copy_from_slice(&raw[src_start..src_start + w / 2]);
@@ -239,41 +256,48 @@ fn uv_crop_top(crop_top: u32) -> usize {
 fn drain_output(
     codec: &mut MediaCodec,
     frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
-) {
+) -> usize {
+    let mut count = 0;
     loop {
         match codec.dequeue_output(0) {
             Ok(out) => {
                 let out_buf: mediacodec::CodecOutputBuffer = out;
-                let flags = out_buf.info().flags;
+                let info = out_buf.info();
+                let flags = info.flags;
                 if BufferFlag::EndOfStream.is_contained_in(flags) {
                     continue;
                 }
                 if BufferFlag::CodecConfig.is_contained_in(flags) {
                     continue;
                 }
+                // success — decoded a frame
                 match output_to_frame(&out_buf) {
                     Ok(frame) => {
                         if frame_tx.send(Ok(frame)).is_err() {
-                            return;
+                            return count;
                         }
+                        count += 1;
                     }
                     Err(e) => {
+                        info!("decoder output_to_frame error: {e:?}");
                         let _ = frame_tx.send(Err(e));
-                        return;
+                        return count;
                     }
                 }
             }
             Err(DequeueOutputError::TryAgainLater) => break,
             Err(DequeueOutputError::OutputFormatChanged)
             | Err(DequeueOutputError::OutputBuffersChanged) => {
-                // Normal lifecycle events; continue polling.
+                // format/buffers already refreshed by wrapper; continue polling
             }
             Err(DequeueOutputError::CodecError(e)) => {
+                info!("decoder drain: CodecError {e:?}");
                 let _ = frame_tx.send(Err(Error::Platform(format!("codec error: {e:?}"))));
-                return;
+                return count;
             }
         }
     }
+    count
 }
 
 fn decode_loop(
@@ -284,61 +308,125 @@ fn decode_loop(
 ) {
     let mut pending: std::collections::VecDeque<EncodedVideoPacket> =
         std::collections::VecDeque::new();
+    let mut in_flight: u32 = 0;
+
+    info!("decode_loop started");
 
     loop {
-        match cmd_rx.blocking_recv() {
-            Some(Cmd::Item(pkt)) => pending.push_back(pkt),
-            Some(Cmd::Flush(done)) => {
-                let res = (|| -> Result<(), Error> {
-                    for _ in 0..5000 {
-                        if pending.is_empty() {
-                            break;
-                        }
-                        drain_output(&mut codec, &frame_tx);
-                        submit_pending(&mut codec, &mut pending, &queue)?;
-                        drain_output(&mut codec, &frame_tx);
-                        if !pending.is_empty() {
-                            thread::sleep(std::time::Duration::from_millis(1));
-                        }
-                    }
-                    if !pending.is_empty() {
-                        return Err(Error::Platform("flush timed out submitting pending".into()));
-                    }
-                    cmd::send_eos(&mut codec)?;
-                    cmd::drain_until_eos(&mut codec, |out| {
-                        let frame = output_to_frame(&out)?;
-                        frame_tx.send(Ok(frame)).map_err(|_| Error::Dropped)
-                    })?;
-                    codec
-                        .flush()
-                        .map_err(|e| Error::Platform(format!("{e:?}")))?;
-                    Ok(())
-                })();
-                let _ = done.send(res);
+        // When no work in the pipeline, block for the next command.
+        // Otherwise, non-blocking poll so we keep draining output.
+        if pending.is_empty() && in_flight == 0 {
+            match cmd_rx.blocking_recv() {
+                Some(Cmd::Item(pkt)) => {
+                    pending.push_back(pkt);
+                }
+                Some(Cmd::Flush(done)) => {
+                    let res = handle_flush(&mut codec, &mut pending, &frame_tx, &queue, &mut in_flight);
+                    let _ = done.send(res);
+                }
+                Some(Cmd::Close) | None => {
+                    info!("decode_loop: close");
+                    drain_output(&mut codec, &frame_tx);
+                    queue.store(0, Ordering::Relaxed);
+                    return;
+                }
             }
-            Some(Cmd::Close) | None => {
-                drain_output(&mut codec, &frame_tx);
-                queue.store(0, Ordering::Relaxed);
-                return;
+        } else {
+            // Drain any pending commands without blocking
+            loop {
+                match cmd_rx.try_recv() {
+                    Ok(Cmd::Item(pkt)) => {
+                        pending.push_back(pkt);
+                    }
+                    Ok(Cmd::Flush(done)) => {
+                        let res = handle_flush(&mut codec, &mut pending, &frame_tx, &queue, &mut in_flight);
+                        let _ = done.send(res);
+                    }
+                    Ok(Cmd::Close) | Err(mpsc::error::TryRecvError::Disconnected) => {
+                        info!("decode_loop: close (non-blocking)");
+                        drain_output(&mut codec, &frame_tx);
+                        queue.store(0, Ordering::Relaxed);
+                        return;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                }
             }
         }
 
-        let _ = submit_pending(&mut codec, &mut pending, &queue);
-        drain_output(&mut codec, &frame_tx);
+        // Service the codec: submit pending packets, drain finished frames
+        if let Ok(submitted) = submit_pending(&mut codec, &mut pending, &queue) {
+            in_flight = in_flight.saturating_add(submitted as u32);
+        }
+        let produced = drain_output(&mut codec, &frame_tx);
+        in_flight = in_flight.saturating_sub(produced as u32);
 
-        if cmd_rx.is_closed() && pending.is_empty() {
+        // Brief sleep when work is in-flight but nothing progressed
+        if pending.is_empty() && in_flight > 0 {
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        // Exit cleanly when sender is dropped and all work is done
+        if cmd_rx.is_closed() && pending.is_empty() && in_flight == 0 {
+            info!("decode_loop: closed+empty");
             drain_output(&mut codec, &frame_tx);
-            queue.store(0, std::sync::atomic::Ordering::Relaxed);
+            queue.store(0, Ordering::Relaxed);
             return;
         }
     }
+}
+
+fn handle_flush(
+    codec: &mut MediaCodec,
+    pending: &mut std::collections::VecDeque<EncodedVideoPacket>,
+    frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
+    queue: &std::sync::Arc<std::sync::atomic::AtomicU32>,
+    in_flight: &mut u32,
+) -> Result<(), Error> {
+    info!("decode_loop: flush start, pending={}", pending.len());
+
+    // Drain any currently available output first
+    let produced = drain_output(codec, frame_tx);
+    *in_flight = in_flight.saturating_sub(produced as u32);
+
+    for _ in 0..5000 {
+        if pending.is_empty() {
+            break;
+        }
+        if let Ok(submitted) = submit_pending(codec, pending, queue) {
+            *in_flight = in_flight.saturating_add(submitted as u32);
+        }
+        let produced = drain_output(codec, frame_tx);
+        *in_flight = in_flight.saturating_sub(produced as u32);
+        if !pending.is_empty() {
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    if !pending.is_empty() {
+        return Err(Error::Platform("flush timed out submitting pending".into()));
+    }
+
+    info!("decode_loop: flush sending EOS");
+    cmd::send_eos(codec)?;
+    cmd::drain_until_eos(codec, |out| {
+        let frame = output_to_frame(&out)?;
+        frame_tx.send(Ok(frame)).map_err(|_| Error::Dropped)
+    })?;
+
+    codec
+        .flush()
+        .map_err(|e| Error::Platform(format!("{e:?}")))?;
+
+    *in_flight = 0;
+    info!("decode_loop: flush done");
+    Ok(())
 }
 
 fn submit_pending(
     codec: &mut MediaCodec,
     pending: &mut std::collections::VecDeque<EncodedVideoPacket>,
     queue: &std::sync::Arc<std::sync::atomic::AtomicU32>,
-) -> Result<(), Error> {
+) -> Result<usize, Error> {
+    let mut count = 0usize;
     while let Some(pkt) = pending.pop_front() {
         if let Ok(buf) = codec.dequeue_input(0) {
             let mut buf: mediacodec::CodecInputBuffer = buf;
@@ -355,11 +443,12 @@ fn submit_pending(
             }
             buf.set_write_size(pkt.payload.len());
             buf.set_time(pkt.timestamp.as_micros() as u64);
+            count += 1;
             queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         } else {
             pending.push_front(pkt);
             break;
         }
     }
-    Ok(())
+    Ok(count)
 }

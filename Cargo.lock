@@ -41,6 +41,7 @@ dependencies = [
  "bytes",
  "cros-codecs",
  "js-sys",
+ "log",
  "mediacodec",
  "thiserror",
  "tokio",

@@ -6,6 +6,7 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
+use log::info;
 use mediacodec::{BufferFlag, MediaCodec, MediaFormat};
 use tokio::sync::{mpsc, oneshot};
 
@@ -92,6 +93,11 @@ pub fn create(
     }
     let _ = format.set_i32("i-frame-interval", 1);
     let _ = format.set_i32("color-format", 21); // COLOR_FormatYUV420SemiPlanar (NV12)
+
+    info!("encoder format: mime={}, {}x{}, bitrate={:?}, framerate={:?}, i-frame-interval=1, color-format=21",
+        config.codec.to_mime(),
+        config.dimensions.width, config.dimensions.height,
+        config.bitrate, config.framerate);
 
     let mime = config.codec.to_mime().to_string();
     let mut codec = MediaCodec::create_encoder(&mime)
@@ -357,7 +363,12 @@ fn drain_encoded_output(
                 if BufferFlag::CodecConfig.is_contained_in(flags) {
                     if let Some(slice) = out_buf.buffer_slice() {
                         let data = slice.to_vec();
-                        *codec_config_pending = Some(codec_config_to_annexb(&data));
+                        let annexb = codec_config_to_annexb(&data);
+                        info!("encoder CodecConfig: {} bytes, annexb {} bytes, first_byte=0x{:02x}, is_annexb={}",
+                            data.len(), annexb.len(),
+                            data.first().copied().unwrap_or(0),
+                            (data.len() >= 4 && (data[..4] == [0x00, 0x00, 0x00, 0x01] || data[..3] == [0x00, 0x00, 0x01])));
+                        *codec_config_pending = Some(annexb);
                         if decoder_cfg.get().is_none() {
                             let _ = decoder_cfg.set(VideoDecoderConfig {
                                 codec: codec_id.clone(),
@@ -410,6 +421,8 @@ fn encode_loop(
     let mut first_packet_sent = false;
     let mut work_pending = false;
 
+    info!("encode_loop started for {}", codec_id.to_mime());
+
     loop {
         // Block only when no work is pending and nothing queued
         if !work_pending && pending.is_empty() {
@@ -418,11 +431,13 @@ fn encode_loop(
                     pending.push_back((frame, keyframe));
                 }
                 Some(Cmd::Flush(done)) => {
+                    info!("encode_loop: flush");
                     let res = handle_flush(&mut codec, &mut pending, &queue, &pkt_tx, &mut codec_config_pending, &mut first_packet_sent);
                     work_pending = false;
                     let _ = done.send(res);
                 }
                 Some(Cmd::Close) | None => {
+                    info!("encode_loop: close");
                     let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone(), &mut codec_config_pending, &mut first_packet_sent);
                     queue.store(0, Ordering::Relaxed);
                     return;
@@ -446,14 +461,17 @@ fn encode_loop(
             }
         }
 
-        if drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx).unwrap_or(false) {
+        let submitted = drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx).unwrap_or(false);
+        if submitted {
             work_pending = true;
         }
-        if drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone(), &mut codec_config_pending, &mut first_packet_sent).unwrap_or(false) {
+        let got_output = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone(), &mut codec_config_pending, &mut first_packet_sent).unwrap_or(false);
+        if got_output {
             work_pending = false;
         }
 
         if cmd_rx.is_closed() && pending.is_empty() {
+            info!("encode_loop: closed+empty, final drain");
             let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone(), &mut codec_config_pending, &mut first_packet_sent);
             queue.store(0, Ordering::Relaxed);
             return;
