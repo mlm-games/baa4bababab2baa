@@ -237,10 +237,11 @@ fn worker_loop(
     let mut pending: VecDeque<(VideoFrame, bool)> = VecDeque::new();
     let mut flushing: Vec<oneshot::Sender<Result<(), Error>>> = Vec::new();
     let mut idle = true;
+    let mut work_pending = false;
 
     loop {
         // Block when truly idle
-        if idle && pending.is_empty() && flushing.is_empty() {
+        if idle && pending.is_empty() && flushing.is_empty() && !work_pending {
             match cmd_rx.blocking_recv() {
                 Some(Cmd::Encode(frame, keyopt)) => {
                     queue.fetch_sub(1, Ordering::Relaxed);
@@ -269,7 +270,6 @@ fn worker_loop(
         }
 
         // Submit pending frames
-        let had_pending = !pending.is_empty();
         while let Some((frame, force_keyframe)) = pending.pop_front() {
             let Some(handle) = pool.get_surface() else {
                 pending.push_front((frame, force_keyframe));
@@ -305,10 +305,10 @@ fn worker_loop(
                 queue.store(0, Ordering::Relaxed);
                 return;
             }
+            work_pending = true;
         }
 
         // Poll output
-        let mut polled = false;
         loop {
             let coded = match encoder.poll() {
                 Ok(c) => c,
@@ -325,7 +325,7 @@ fn worker_loop(
             let Some(coded) = coded else {
                 break;
             };
-            polled = true;
+            work_pending = false;
 
             let ts = Duration::from_micros(coded.metadata.timestamp);
             let keyframe = keyframe_from_bitstream(&coded.bitstream, &config.codec)
@@ -381,19 +381,20 @@ fn worker_loop(
                     }
                 }
             }
+            work_pending = false;
             for done in flushing.drain(..) {
                 let _ = done.send(Ok(()));
             }
         }
 
-        if cmd_rx.is_closed() && pending.is_empty() && flushing.is_empty() {
+        if cmd_rx.is_closed() && pending.is_empty() && flushing.is_empty() && !work_pending {
             queue.store(0, Ordering::Relaxed);
             return;
         }
 
         // If we didn't poll anything (no output ready) and nothing is pending, go idle.
         // NOTE: Don't go idle if we just submitted work, the HW may still be processing.
-        idle = !had_pending && !polled && pending.is_empty() && flushing.is_empty();
+        idle = !work_pending && pending.is_empty() && flushing.is_empty();
         if !idle {
             // Avoids tight loop when surfaces aren't available
             thread::sleep(Duration::from_millis(1));

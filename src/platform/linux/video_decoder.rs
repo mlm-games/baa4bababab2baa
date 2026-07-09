@@ -84,7 +84,7 @@ impl VideoDecoderOutput for CrosVideoDecoderOutput {
             Ok(Ok(frame)) => Ok(Some(frame)),
             Ok(Err(e)) => Err(e),
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::error::TryRecvError::Disconnected) => Ok(None),
+            Err(mpsc::error::TryRecvError::Disconnected) => Err(Error::Dropped),
         }
     }
 }
@@ -316,8 +316,8 @@ fn drain_events<F: CcVideoFrame + 'static>(
     cached_w: &mut u32,
     cached_h: &mut u32,
     cached_display: &mut Resolution,
-) -> Result<bool, Error> {
-    let mut sent = false;
+) -> Result<usize, Error> {
+    let mut count = 0;
     while let Some(ev) = dec.next_event() {
         match ev {
             DecoderEvent::FormatChanged => {
@@ -352,7 +352,7 @@ fn drain_events<F: CcVideoFrame + 'static>(
                         e
                     })?;
                 frame_tx.send(Ok(out)).map_err(|_| Error::Dropped)?;
-                sent = true;
+                count += 1;
 
                 if *have_cache {
                     frame_queue.push(create_video_frame(
@@ -365,7 +365,7 @@ fn drain_events<F: CcVideoFrame + 'static>(
             }
         }
     }
-    Ok(sent)
+    Ok(count)
 }
 
 fn create_video_frame(
