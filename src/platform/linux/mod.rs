@@ -66,7 +66,10 @@ impl CrosCodecsHost {
         &self,
         config: &VideoEncoderConfig,
     ) -> Result<bool, Error> {
-        Ok(matches!(config.codec, crate::types::VideoCodecId::H264 { .. }))
+        Ok(matches!(
+            config.codec,
+            crate::types::VideoCodecId::H264 { .. }
+        ))
     }
 
     pub async fn is_audio_encoder_supported(

@@ -180,7 +180,9 @@ fn audio_encode_loop(
                     drain_pending_inputs(&mut codec, &mut pending, &queue)?;
                     cmd::send_eos(&mut codec)?;
                     cmd::drain_until_eos(&mut codec, |out| {
-                        let ts = std::time::Duration::from_micros(out.info().presentation_time_us as u64);
+                        let ts = std::time::Duration::from_micros(
+                            out.info().presentation_time_us as u64,
+                        );
                         let payload = if let Some(slice) = out.buffer_slice() {
                             bytes::Bytes::copy_from_slice(slice)
                         } else {
@@ -193,7 +195,9 @@ fn audio_encode_loop(
                         };
                         pkt_tx.send(Ok(pkt)).map_err(|_| Error::Dropped)
                     })?;
-                    codec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
+                    codec
+                        .flush()
+                        .map_err(|e| Error::Platform(format!("{e:?}")))?;
                     Ok(())
                 })();
                 let _ = done.send(res);

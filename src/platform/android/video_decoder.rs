@@ -33,9 +33,7 @@ impl VideoDecoderInput for AndroidVideoDecoderInput {
     fn decode(&mut self, packet: EncodedVideoPacket) -> Result<(), Error> {
         self.queue
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.tx
-            .send(Cmd::Item(packet))
-            .map_err(|_| Error::Dropped)
+        self.tx.send(Cmd::Item(packet)).map_err(|_| Error::Dropped)
     }
 
     async fn flush(&mut self) -> Result<(), Error> {
@@ -81,20 +79,25 @@ pub fn create(
 
     if let Some(desc) = &config.description {
         let csd_first: Vec<u8> = desc.iter().take(8).copied().collect();
-        info!("decoder csd-0: {} bytes, first={:02x?}, starts_with_annexb={}",
-            desc.len(), csd_first,
-            desc.len() >= 4 && (desc[..4] == [0x00, 0x00, 0x00, 0x01]));
+        info!(
+            "decoder csd-0: {} bytes, first={:02x?}, starts_with_annexb={}",
+            desc.len(),
+            csd_first,
+            desc.len() >= 4 && (desc[..4] == [0x00, 0x00, 0x00, 0x01])
+        );
         if desc.len() >= 4 && desc[..4] != [0x00, 0x00, 0x00, 0x01] && desc[0] == 1 {
             info!("decoder csd-0: appears to be hvcC/avcC format (version=1)");
         }
         let _ = format.set_buffer("csd-0", desc);
     }
 
-    info!("decoder format: mime={}, {}x{}, csd-0 present={}",
+    info!(
+        "decoder format: mime={}, {}x{}, csd-0 present={}",
         config.codec.to_mime(),
         config.resolution.map(|r| r.width).unwrap_or(0),
         config.resolution.map(|r| r.height).unwrap_or(0),
-        config.description.is_some());
+        config.description.is_some()
+    );
 
     let mime = config.codec.to_mime().to_string();
 
@@ -175,8 +178,7 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
             for row in 0..h {
                 let src_start = (crop_top as usize + row) * stride + crop_l;
                 let dst_start = row * w;
-                out_y[dst_start..dst_start + w]
-                    .copy_from_slice(&raw[src_start..src_start + w]);
+                out_y[dst_start..dst_start + w].copy_from_slice(&raw[src_start..src_start + w]);
             }
             // UV plane (interleaved)
             let uv_h = h / 2;
@@ -184,8 +186,7 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
             for row in 0..uv_h {
                 let src_start = y_size + (uv_crop_top + row) * stride + crop_l;
                 let dst_start = row * w;
-                out_uv[dst_start..dst_start + w]
-                    .copy_from_slice(&raw[src_start..src_start + w]);
+                out_uv[dst_start..dst_start + w].copy_from_slice(&raw[src_start..src_start + w]);
             }
             Ok(VideoFrame {
                 dimensions: Dimensions::new(vis_w, vis_h),
@@ -216,8 +217,7 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
             for row in 0..h {
                 let src_start = (crop_top as usize + row) * stride + crop_l;
                 let dst_start = row * w;
-                out_y[dst_start..dst_start + w]
-                    .copy_from_slice(&raw[src_start..src_start + w]);
+                out_y[dst_start..dst_start + w].copy_from_slice(&raw[src_start..src_start + w]);
             }
             // U plane
             let uv_stride = stride / 2;
@@ -321,7 +321,8 @@ fn decode_loop(
                     pending.push_back(pkt);
                 }
                 Some(Cmd::Flush(done)) => {
-                    let res = handle_flush(&mut codec, &mut pending, &frame_tx, &queue, &mut in_flight);
+                    let res =
+                        handle_flush(&mut codec, &mut pending, &frame_tx, &queue, &mut in_flight);
                     let _ = done.send(res);
                 }
                 Some(Cmd::Close) | None => {
@@ -339,7 +340,13 @@ fn decode_loop(
                         pending.push_back(pkt);
                     }
                     Ok(Cmd::Flush(done)) => {
-                        let res = handle_flush(&mut codec, &mut pending, &frame_tx, &queue, &mut in_flight);
+                        let res = handle_flush(
+                            &mut codec,
+                            &mut pending,
+                            &frame_tx,
+                            &queue,
+                            &mut in_flight,
+                        );
                         let _ = done.send(res);
                     }
                     Ok(Cmd::Close) | Err(mpsc::error::TryRecvError::Disconnected) => {

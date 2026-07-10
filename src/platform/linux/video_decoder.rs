@@ -101,12 +101,7 @@ pub fn create(
     let profiles = va_display
         .query_config_profiles()
         .map_err(|e| Error::Platform(format!("VA profiles: {e}")))?;
-    let required = format_to_va_profile(fmt);
-    if !profiles.contains(&required) {
-        return Err(Error::Platform(format!(
-            "{fmt:?} not supported by VA driver"
-        )));
-    }
+    check_codec_supported(fmt, &profiles).map_err(|e| Error::Platform(e))?;
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd>();
     let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Result<VideoFrame, Error>>();
@@ -121,15 +116,49 @@ pub fn create(
     ))
 }
 
-fn format_to_va_profile(fmt: EncodedFormat) -> libva::VAProfile::Type {
+fn check_codec_supported(
+    fmt: EncodedFormat,
+    profiles: &[libva::VAProfile::Type],
+) -> Result<(), String> {
     use libva::VAProfile;
     match fmt {
-        EncodedFormat::H264 => VAProfile::VAProfileH264Main,
-        EncodedFormat::H265 => VAProfile::VAProfileHEVCMain,
-        EncodedFormat::VP8 => VAProfile::VAProfileVP8Version0_3,
-        EncodedFormat::VP9 => VAProfile::VAProfileVP9Profile0,
-        EncodedFormat::AV1 => VAProfile::VAProfileAV1Profile0,
+        EncodedFormat::H265 => {
+            // HEVC has multiple profiles (Main, Main10, REXT, SCC); check if the
+            // driver supports at least one of the common decode profiles.
+            if !profiles.iter().any(|p| {
+                matches!(
+                    *p,
+                    VAProfile::VAProfileHEVCMain
+                        | VAProfile::VAProfileHEVCMain10
+                        | VAProfile::VAProfileHEVCMain12
+                        | VAProfile::VAProfileHEVCMain422_10
+                        | VAProfile::VAProfileHEVCMain422_12
+                        | VAProfile::VAProfileHEVCMain444
+                        | VAProfile::VAProfileHEVCMain444_10
+                        | VAProfile::VAProfileHEVCMain444_12
+                        | VAProfile::VAProfileHEVCSccMain
+                        | VAProfile::VAProfileHEVCSccMain10
+                        | VAProfile::VAProfileHEVCSccMain444
+                        | VAProfile::VAProfileHEVCSccMain444_10
+                )
+            }) {
+                return Err(format!("{fmt:?} not supported by VA driver"));
+            }
+        }
+        _ => {
+            let profile = match fmt {
+                EncodedFormat::H264 => VAProfile::VAProfileH264Main,
+                EncodedFormat::VP8 => VAProfile::VAProfileVP8Version0_3,
+                EncodedFormat::VP9 => VAProfile::VAProfileVP9Profile0,
+                EncodedFormat::AV1 => VAProfile::VAProfileAV1Profile0,
+                _ => return Err(format!("{fmt:?} not supported by VA driver")),
+            };
+            if !profiles.contains(&profile) {
+                return Err(format!("{fmt:?} not supported by VA driver"));
+            }
+        }
     }
+    Ok(())
 }
 
 fn make_decoder(
@@ -167,6 +196,7 @@ fn make_decoder(
         )
         .map_err(|e| format!("failed to create AV1 decoder: {e}"))?
         .into_trait_object()),
+        _ => Err(format!("unsupported codec: {fmt:?}")),
     }
 }
 
@@ -197,12 +227,14 @@ fn worker_loop(
         width: 0,
         height: 0,
     };
+    let mut cached_format = cros_codecs::DecodedFormat::NV12;
 
     let va_display_clone = va_display.clone();
     let mut alloc_frame = move |stream_info: &StreamInfo| -> Result<GenericDmaVideoFrame, Error> {
         create_video_frame(
             stream_info.coded_resolution.width,
             stream_info.coded_resolution.height,
+            stream_info.format,
             stream_info.display_resolution,
             &va_display_clone,
         )
@@ -234,6 +266,7 @@ fn worker_loop(
                             &mut cached_w,
                             &mut cached_h,
                             &mut cached_display,
+                            &mut cached_format,
                         )?;
                     }
                     Ok(())
@@ -290,6 +323,7 @@ fn worker_loop(
                             &mut cached_w,
                             &mut cached_h,
                             &mut cached_display,
+                            &mut cached_format,
                         )?;
                     }
 
@@ -316,6 +350,7 @@ fn drain_events<F: CcVideoFrame + 'static>(
     cached_w: &mut u32,
     cached_h: &mut u32,
     cached_display: &mut Resolution,
+    cached_format: &mut cros_codecs::DecodedFormat,
 ) -> Result<usize, Error> {
     let mut count = 0;
     while let Some(ev) = dec.next_event() {
@@ -325,6 +360,7 @@ fn drain_events<F: CcVideoFrame + 'static>(
                     *cached_w = info.coded_resolution.width;
                     *cached_h = info.coded_resolution.height;
                     *cached_display = info.display_resolution;
+                    *cached_format = info.format;
                     *have_cache = true;
                     frame_queue.clear();
                     for _ in 0..info.min_num_frames {
@@ -340,17 +376,21 @@ fn drain_events<F: CcVideoFrame + 'static>(
                 let ts = Timestamp::from_micros(handle.timestamp());
 
                 let frame_arc = handle.video_frame();
-                let out = nv12_frame_to_i420(&*frame_arc, ts)
-                    .or_else(|e| {
+                let out = match *cached_format {
+                    cros_codecs::DecodedFormat::I010
+                    | cros_codecs::DecodedFormat::I210
+                    | cros_codecs::DecodedFormat::I410 => p010_frame_to_i010(&*frame_arc, ts),
+                    _ => nv12_frame_to_i420(&*frame_arc, ts).or_else(|e| {
                         eprintln!(
                             "[VAAPI] nv12_frame_to_i420 failed: {e:?}, trying VA-API fallback"
                         );
                         nv12_frame_to_i420_via_vaapi(&*frame_arc, ts, va_display)
-                    })
-                    .map_err(|e| {
-                        eprintln!("[VAAPI] drain_events FrameReady failed: {e:?}");
-                        e
-                    })?;
+                    }),
+                }
+                .map_err(|e| {
+                    eprintln!("[VAAPI] drain_events FrameReady failed: {e:?}");
+                    e
+                })?;
                 frame_tx.send(Ok(out)).map_err(|_| Error::Dropped)?;
                 count += 1;
 
@@ -358,6 +398,7 @@ fn drain_events<F: CcVideoFrame + 'static>(
                     frame_queue.push(create_video_frame(
                         *cached_w,
                         *cached_h,
+                        *cached_format,
                         *cached_display,
                         va_display,
                     )?);
@@ -368,15 +409,34 @@ fn drain_events<F: CcVideoFrame + 'static>(
     Ok(count)
 }
 
+fn rt_format_from_format(format: cros_codecs::DecodedFormat) -> u32 {
+    use cros_codecs::DecodedFormat;
+    match format {
+        DecodedFormat::NV12 | DecodedFormat::I420 => libva::VA_RT_FORMAT_YUV420,
+        DecodedFormat::I422 => libva::VA_RT_FORMAT_YUV422,
+        DecodedFormat::I444 => libva::VA_RT_FORMAT_YUV444,
+        DecodedFormat::I010 => libva::VA_RT_FORMAT_YUV420_10,
+        DecodedFormat::I012 => libva::VA_RT_FORMAT_YUV420_12,
+        DecodedFormat::I210 => libva::VA_RT_FORMAT_YUV422_10,
+        DecodedFormat::I212 => libva::VA_RT_FORMAT_YUV422_12,
+        DecodedFormat::I410 => libva::VA_RT_FORMAT_YUV444_10,
+        DecodedFormat::I412 => libva::VA_RT_FORMAT_YUV444_12,
+        DecodedFormat::MM21 => libva::VA_RT_FORMAT_YUV420,
+        _ => libva::VA_RT_FORMAT_YUV420,
+    }
+}
+
 fn create_video_frame(
     w: u32,
     h: u32,
+    format: cros_codecs::DecodedFormat,
     display_resolution: Resolution,
     va_display: &Arc<libva::Display>,
 ) -> Result<GenericDmaVideoFrame, Error> {
+    let rt_format = rt_format_from_format(format);
     let surfaces = va_display
         .create_surfaces::<()>(
-            libva::VA_RT_FORMAT_YUV420,
+            rt_format,
             Some(u32::from(Fourcc::from(b"NV12"))),
             w,
             h,
@@ -384,9 +444,10 @@ fn create_video_frame(
             vec![()],
         )
         .map_err(|e| Error::Platform(format!("VA surface allocation failed: {e:?}")))?;
-    let surface = surfaces.into_iter().next().ok_or_else(|| {
-        Error::Platform("VA surface allocation returned zero surfaces".into())
-    })?;
+    let surface = surfaces
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Platform("VA surface allocation returned zero surfaces".into()))?;
     let desc = surface
         .export_prime()
         .map_err(|e| Error::Platform(format!("VA surface export failed: {e:?}")))?;
@@ -400,13 +461,11 @@ fn create_video_frame(
         .collect();
     let mut dma_handles = Vec::new();
     for obj in &desc.objects {
-        dma_handles.push(
-            std::fs::File::from(
-                obj.fd
-                    .try_clone()
-                    .map_err(|e| Error::Platform(format!("FD clone failed: {e}")))?,
-            ),
-        );
+        dma_handles.push(std::fs::File::from(
+            obj.fd
+                .try_clone()
+                .map_err(|e| Error::Platform(format!("FD clone failed: {e}")))?,
+        ));
     }
     GenericDmaVideoFrame::new(
         dma_handles,
@@ -470,7 +529,8 @@ fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(
     let raw = image.as_ref();
 
     let chroma_height = align_up(height as u32, 2) as usize / 2;
-    if y_off + luma_stride * height > raw.len() || uv_off + chroma_stride * chroma_height > raw.len()
+    if y_off + luma_stride * height > raw.len()
+        || uv_off + chroma_stride * chroma_height > raw.len()
     {
         return Err(Error::Platform("derived image data too small".into()));
     }
@@ -489,6 +549,61 @@ fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(
         width,
         height,
     );
+
+    Ok(VideoFrame {
+        dimensions: Dimensions {
+            width: res.width,
+            height: res.height,
+        },
+        format: PixelFormat::Yuv420p,
+        timestamp,
+        planes: VideoPlanes::Cpu(data),
+    })
+}
+
+fn p010_frame_to_i010<F: CcVideoFrame>(
+    frame: &F,
+    timestamp: Timestamp,
+) -> Result<VideoFrame, Error> {
+    let res = frame.resolution();
+    let width = res.width as usize;
+    let height = res.height as usize;
+
+    let luma_size = res.get_area();
+    let chroma_size =
+        align_up(width as u32, 2) as usize / 2 * (align_up(height as u32, 2) as usize / 2);
+
+    let mut data = vec![0u8; luma_size + 2 * chroma_size];
+    let (dst_y, dst_uv) = data.split_at_mut(luma_size);
+    let (dst_u, dst_v) = dst_uv.split_at_mut(chroma_size);
+
+    let pitches = frame.get_plane_pitch();
+    let mapping = frame.map().map_err(|e| Error::Platform(format!("{e:?}")))?;
+    let planes = mapping.get();
+
+    let src_y = planes[Y_PLANE];
+    let src_uv = planes[UV_PLANE];
+    let y_pitch = pitches[Y_PLANE];
+    let uv_pitch = pitches[UV_PLANE];
+
+    // P010 stores 10-bit samples in 16-bit words (little-endian).  The high
+    // byte of each word is a reasonable 8-bit approximation (≙ >> 2 for
+    // high-10 convention, ≙ >> 8 for low-10 convention).
+    for y in 0..height {
+        for x in 0..width {
+            dst_y[y * width + x] = src_y[y * y_pitch + x * 2 + 1];
+        }
+    }
+
+    let chroma_h = align_up(height as u32, 2) as usize / 2;
+    let chroma_w = align_up(width as u32, 2) as usize;
+    for y in 0..chroma_h {
+        for x in 0..chroma_w / 2 {
+            let off = y * uv_pitch + x * 4;
+            dst_u[y * (chroma_w / 2) + x] = src_uv[off + 1]; // U high byte
+            dst_v[y * (chroma_w / 2) + x] = src_uv[off + 3]; // V high byte
+        }
+    }
 
     Ok(VideoFrame {
         dimensions: Dimensions {

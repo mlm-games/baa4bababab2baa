@@ -94,10 +94,14 @@ pub fn create(
     let _ = format.set_i32("i-frame-interval", 1);
     let _ = format.set_i32("color-format", 21); // COLOR_FormatYUV420SemiPlanar (NV12)
 
-    info!("encoder format: mime={}, {}x{}, bitrate={:?}, framerate={:?}, i-frame-interval=1, color-format=21",
+    info!(
+        "encoder format: mime={}, {}x{}, bitrate={:?}, framerate={:?}, i-frame-interval=1, color-format=21",
         config.codec.to_mime(),
-        config.dimensions.width, config.dimensions.height,
-        config.bitrate, config.framerate);
+        config.dimensions.width,
+        config.dimensions.height,
+        config.bitrate,
+        config.framerate
+    );
 
     let mime = config.codec.to_mime().to_string();
     let mut codec = MediaCodec::create_encoder(&mime)
@@ -141,9 +145,7 @@ fn codec_config_to_annexb(data: &[u8]) -> Vec<u8> {
     if data.len() < 4 {
         return data.to_vec();
     }
-    if data[..4] == [0x00, 0x00, 0x00, 0x01]
-        || data[..3] == [0x00, 0x00, 0x01]
-    {
+    if data[..4] == [0x00, 0x00, 0x00, 0x01] || data[..3] == [0x00, 0x00, 0x01] {
         return data.to_vec();
     }
     if data.len() >= 23 && data[0] == 1 {
@@ -333,9 +335,17 @@ fn handle_flush(
         } else {
             &[]
         };
-        send_encoded_packet(pkt_tx, out.info(), payload, codec_config_pending, first_packet_sent)
+        send_encoded_packet(
+            pkt_tx,
+            out.info(),
+            payload,
+            codec_config_pending,
+            first_packet_sent,
+        )
     })?;
-    codec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
+    codec
+        .flush()
+        .map_err(|e| Error::Platform(format!("{e:?}")))?;
     Ok(())
 }
 
@@ -364,10 +374,15 @@ fn drain_encoded_output(
                     if let Some(slice) = out_buf.buffer_slice() {
                         let data = slice.to_vec();
                         let annexb = codec_config_to_annexb(&data);
-                        info!("encoder CodecConfig: {} bytes, annexb {} bytes, first_byte=0x{:02x}, is_annexb={}",
-                            data.len(), annexb.len(),
+                        info!(
+                            "encoder CodecConfig: {} bytes, annexb {} bytes, first_byte=0x{:02x}, is_annexb={}",
+                            data.len(),
+                            annexb.len(),
                             data.first().copied().unwrap_or(0),
-                            (data.len() >= 4 && (data[..4] == [0x00, 0x00, 0x00, 0x01] || data[..3] == [0x00, 0x00, 0x01])));
+                            (data.len() >= 4
+                                && (data[..4] == [0x00, 0x00, 0x00, 0x01]
+                                    || data[..3] == [0x00, 0x00, 0x01]))
+                        );
                         *codec_config_pending = Some(annexb);
                         if decoder_cfg.get().is_none() {
                             let _ = decoder_cfg.set(VideoDecoderConfig {
@@ -391,7 +406,13 @@ fn drain_encoded_output(
                 };
 
                 had_output = true;
-                send_encoded_packet(pkt_tx, &info, payload, codec_config_pending, first_packet_sent)?;
+                send_encoded_packet(
+                    pkt_tx,
+                    &info,
+                    payload,
+                    codec_config_pending,
+                    first_packet_sent,
+                )?;
             }
             Err(DequeueOutputError::TryAgainLater) => break,
             Err(DequeueOutputError::OutputFormatChanged)
@@ -432,13 +453,28 @@ fn encode_loop(
                 }
                 Some(Cmd::Flush(done)) => {
                     info!("encode_loop: flush");
-                    let res = handle_flush(&mut codec, &mut pending, &queue, &pkt_tx, &mut codec_config_pending, &mut first_packet_sent);
+                    let res = handle_flush(
+                        &mut codec,
+                        &mut pending,
+                        &queue,
+                        &pkt_tx,
+                        &mut codec_config_pending,
+                        &mut first_packet_sent,
+                    );
                     work_pending = false;
                     let _ = done.send(res);
                 }
                 Some(Cmd::Close) | None => {
                     info!("encode_loop: close");
-                    let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone(), &mut codec_config_pending, &mut first_packet_sent);
+                    let _ = drain_encoded_output(
+                        &mut codec,
+                        &pkt_tx,
+                        &decoder_cfg,
+                        dimensions,
+                        codec_id.clone(),
+                        &mut codec_config_pending,
+                        &mut first_packet_sent,
+                    );
                     queue.store(0, Ordering::Relaxed);
                     return;
                 }
@@ -449,30 +485,63 @@ fn encode_loop(
             match cmd {
                 Cmd::Item((frame, keyframe)) => pending.push_back((frame, keyframe)),
                 Cmd::Flush(done) => {
-                    let res = handle_flush(&mut codec, &mut pending, &queue, &pkt_tx, &mut codec_config_pending, &mut first_packet_sent);
+                    let res = handle_flush(
+                        &mut codec,
+                        &mut pending,
+                        &queue,
+                        &pkt_tx,
+                        &mut codec_config_pending,
+                        &mut first_packet_sent,
+                    );
                     work_pending = false;
                     let _ = done.send(res);
                 }
                 Cmd::Close => {
-                    let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone(), &mut codec_config_pending, &mut first_packet_sent);
+                    let _ = drain_encoded_output(
+                        &mut codec,
+                        &pkt_tx,
+                        &decoder_cfg,
+                        dimensions,
+                        codec_id.clone(),
+                        &mut codec_config_pending,
+                        &mut first_packet_sent,
+                    );
                     queue.store(0, Ordering::Relaxed);
                     return;
                 }
             }
         }
 
-        let submitted = drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx).unwrap_or(false);
+        let submitted =
+            drain_pending_frames(&mut codec, &mut pending, &queue, &pkt_tx).unwrap_or(false);
         if submitted {
             work_pending = true;
         }
-        let got_output = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone(), &mut codec_config_pending, &mut first_packet_sent).unwrap_or(false);
+        let got_output = drain_encoded_output(
+            &mut codec,
+            &pkt_tx,
+            &decoder_cfg,
+            dimensions,
+            codec_id.clone(),
+            &mut codec_config_pending,
+            &mut first_packet_sent,
+        )
+        .unwrap_or(false);
         if got_output {
             work_pending = false;
         }
 
         if cmd_rx.is_closed() && pending.is_empty() {
             info!("encode_loop: closed+empty, final drain");
-            let _ = drain_encoded_output(&mut codec, &pkt_tx, &decoder_cfg, dimensions, codec_id.clone(), &mut codec_config_pending, &mut first_packet_sent);
+            let _ = drain_encoded_output(
+                &mut codec,
+                &pkt_tx,
+                &decoder_cfg,
+                dimensions,
+                codec_id.clone(),
+                &mut codec_config_pending,
+                &mut first_packet_sent,
+            );
             queue.store(0, Ordering::Relaxed);
             return;
         }

@@ -1,5 +1,5 @@
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
 
 use crate::error::Error;
 use crate::traits::video::{FutureMaybeSend, MaybeSend};
@@ -56,12 +56,17 @@ impl<T: AudioEncoderInput + ?Sized> AudioEncoderInputBoxed for T {
 }
 
 pub trait AudioEncoderOutputBoxed: MaybeSend {
-    fn packet(&mut self) -> Pin<Box<dyn FutureMaybeSend<Output = Result<Option<EncodedAudioPacket>, Error>> + '_>>;
+    fn packet(
+        &mut self,
+    ) -> Pin<Box<dyn FutureMaybeSend<Output = Result<Option<EncodedAudioPacket>, Error>> + '_>>;
     fn decoder_config(&self) -> Option<&AudioDecoderConfig>;
 }
 
 impl<T: AudioEncoderOutput + ?Sized> AudioEncoderOutputBoxed for T {
-    fn packet(&mut self) -> Pin<Box<dyn FutureMaybeSend<Output = Result<Option<EncodedAudioPacket>, Error>> + '_>> {
+    fn packet(
+        &mut self,
+    ) -> Pin<Box<dyn FutureMaybeSend<Output = Result<Option<EncodedAudioPacket>, Error>> + '_>>
+    {
         Box::pin(AudioEncoderOutput::packet(self))
     }
     fn decoder_config(&self) -> Option<&AudioDecoderConfig> {
@@ -88,11 +93,15 @@ impl<T: AudioDecoderInput + ?Sized> AudioDecoderInputBoxed for T {
 }
 
 pub trait AudioDecoderOutputBoxed: MaybeSend {
-    fn frame(&mut self) -> Pin<Box<dyn FutureMaybeSend<Output = Result<Option<AudioFrame>, Error>> + '_>>;
+    fn frame(
+        &mut self,
+    ) -> Pin<Box<dyn FutureMaybeSend<Output = Result<Option<AudioFrame>, Error>> + '_>>;
 }
 
 impl<T: AudioDecoderOutput + ?Sized> AudioDecoderOutputBoxed for T {
-    fn frame(&mut self) -> Pin<Box<dyn FutureMaybeSend<Output = Result<Option<AudioFrame>, Error>> + '_>> {
+    fn frame(
+        &mut self,
+    ) -> Pin<Box<dyn FutureMaybeSend<Output = Result<Option<AudioFrame>, Error>> + '_>> {
         Box::pin(AudioDecoderOutput::frame(self))
     }
 }

@@ -11,7 +11,10 @@ use crate::types::common::{Dimensions, PixelFormat, Timestamp};
 /// WebCodecs full codec strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VideoCodecId {
-    H264 { profile: Option<u32>, level: Option<u32> },
+    H264 {
+        profile: Option<u32>,
+        level: Option<u32>,
+    },
     Hevc,
     Vp8,
     Vp9,
@@ -24,7 +27,10 @@ impl VideoCodecId {
     /// Create from a MIME-type string (e.g. `"video/avc"`).
     pub fn from_mime(mime: &str) -> Self {
         match mime {
-            "video/avc" | "video/h264" => VideoCodecId::H264 { profile: None, level: None },
+            "video/avc" | "video/h264" => VideoCodecId::H264 {
+                profile: None,
+                level: None,
+            },
             "video/hevc" | "video/h265" => VideoCodecId::Hevc,
             "video/vp8" => VideoCodecId::Vp8,
             "video/vp9" => VideoCodecId::Vp9,
@@ -85,7 +91,10 @@ pub struct VideoEncoderConfig {
 impl Default for VideoEncoderConfig {
     fn default() -> Self {
         Self {
-            codec: VideoCodecId::H264 { profile: None, level: None },
+            codec: VideoCodecId::H264 {
+                profile: None,
+                level: None,
+            },
             dimensions: Dimensions::new(1920, 1080),
             bitrate: None,
             framerate: None,
@@ -107,7 +116,10 @@ pub struct VideoDecoderConfig {
 impl Default for VideoDecoderConfig {
     fn default() -> Self {
         Self {
-            codec: VideoCodecId::H264 { profile: None, level: None },
+            codec: VideoCodecId::H264 {
+                profile: None,
+                level: None,
+            },
             resolution: None,
             description: None,
             hardware_acceleration: None,

@@ -419,7 +419,7 @@ fn create_vaapi_encoder(
     match &config.codec {
         VideoCodecId::H264 { .. } => {
             use cros_codecs::codec::h264::parser::{Level, Profile};
-            use cros_codecs::encoder::{RateControl, Tunings};
+            use cros_codecs::encoder::{PredictionStructure, RateControl, Tunings};
 
             let level = config
                 .level
@@ -435,16 +435,22 @@ fn create_vaapi_encoder(
                 })
                 .unwrap_or(Level::L4);
 
+            let idr_period = framerate.max(1) as u16;
+
             let cfg = cros_codecs::encoder::h264::EncoderConfig {
                 resolution: coded_size,
                 profile: Profile::Main,
                 level,
+                pred_structure: PredictionStructure::LowDelay { limit: idr_period },
                 initial_tunings: Tunings {
-                    rate_control: RateControl::ConstantBitrate(bitrate),
+                    rate_control: RateControl::VariableBitrate {
+                        target: bitrate,
+                        maximum: bitrate * 2,
+                    },
                     framerate,
+                    max_quality: 40,
                     ..Default::default()
                 },
-                ..Default::default()
             };
 
             let enc = cros_codecs::encoder::stateless::h264::StatelessEncoder::new_native_vaapi(

@@ -83,7 +83,14 @@ pub fn create(
     let fallback_sample_rate = config.sample_rate;
 
     thread::spawn(move || {
-        audio_decode_loop(codec, cmd_rx, frame_tx, queue2, fallback_channels, fallback_sample_rate)
+        audio_decode_loop(
+            codec,
+            cmd_rx,
+            frame_tx,
+            queue2,
+            fallback_channels,
+            fallback_sample_rate,
+        )
     });
 
     Ok((
@@ -131,22 +138,25 @@ fn drain_output(
     while let Ok(out_buf) = codec.dequeue_output(0) {
         let out_buf: CodecOutputBuffer = out_buf;
         let fmt = out_buf.format();
-        let channels = fmt.get_i32("channel-count").map(|v| v as u32).unwrap_or(fallback_channels);
-        let sample_rate = fmt.get_i32("sample-rate").map(|v| v as u32).unwrap_or(fallback_sample_rate);
-        let ts =
-            std::time::Duration::from_micros(out_buf.info().presentation_time_us as u64);
+        let channels = fmt
+            .get_i32("channel-count")
+            .map(|v| v as u32)
+            .unwrap_or(fallback_channels);
+        let sample_rate = fmt
+            .get_i32("sample-rate")
+            .map(|v| v as u32)
+            .unwrap_or(fallback_sample_rate);
+        let ts = std::time::Duration::from_micros(out_buf.info().presentation_time_us as u64);
 
         if let Some(mediacodec::Frame::Audio(audio)) = out_buf.frame() {
             let audio_fmt = audio.format();
             let (fmt_out, samples) = match audio_fmt {
                 McSampleFormat::S16(buf) => {
-                    let bytes: Vec<u8> =
-                        buf.iter().flat_map(|s| i16::to_le_bytes(*s)).collect();
+                    let bytes: Vec<u8> = buf.iter().flat_map(|s| i16::to_le_bytes(*s)).collect();
                     (SampleFormat::S16, bytes)
                 }
                 McSampleFormat::F32(buf) => {
-                    let bytes: Vec<u8> =
-                        buf.iter().flat_map(|s| f32::to_le_bytes(*s)).collect();
+                    let bytes: Vec<u8> = buf.iter().flat_map(|s| f32::to_le_bytes(*s)).collect();
                     (SampleFormat::F32, bytes)
                 }
             };
@@ -185,9 +195,17 @@ fn audio_decode_loop(
                     cmd::send_eos(&mut codec)?;
                     cmd::drain_until_eos(&mut codec, |out_buf| {
                         let fmt = out_buf.format();
-                        let channels = fmt.get_i32("channel-count").map(|v| v as u32).unwrap_or(fallback_channels);
-                        let sample_rate = fmt.get_i32("sample-rate").map(|v| v as u32).unwrap_or(fallback_sample_rate);
-                        let ts = std::time::Duration::from_micros(out_buf.info().presentation_time_us as u64);
+                        let channels = fmt
+                            .get_i32("channel-count")
+                            .map(|v| v as u32)
+                            .unwrap_or(fallback_channels);
+                        let sample_rate = fmt
+                            .get_i32("sample-rate")
+                            .map(|v| v as u32)
+                            .unwrap_or(fallback_sample_rate);
+                        let ts = std::time::Duration::from_micros(
+                            out_buf.info().presentation_time_us as u64,
+                        );
                         if let Some(mediacodec::Frame::Audio(audio)) = out_buf.frame() {
                             let audio_fmt = audio.format();
                             let (fmt_out, samples) = match audio_fmt {
@@ -213,7 +231,9 @@ fn audio_decode_loop(
                         }
                         Ok(())
                     })?;
-                    codec.flush().map_err(|e| Error::Platform(format!("{e:?}")))?;
+                    codec
+                        .flush()
+                        .map_err(|e| Error::Platform(format!("{e:?}")))?;
                     Ok(())
                 })();
                 let _ = done.send(res);
@@ -225,7 +245,12 @@ fn audio_decode_loop(
         }
 
         let _ = drain_pending_inputs(&mut codec, &mut pending, &queue);
-        drain_output(&mut codec, &frame_tx, fallback_channels, fallback_sample_rate);
+        drain_output(
+            &mut codec,
+            &frame_tx,
+            fallback_channels,
+            fallback_sample_rate,
+        );
 
         if cmd_rx.is_closed() && pending.is_empty() {
             queue.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -233,5 +258,3 @@ fn audio_decode_loop(
         }
     }
 }
-
-
