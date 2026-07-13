@@ -161,8 +161,12 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
         21 | 2141391876 | 2141391878 | 2130708361 => {
             // COLOR_FormatYUV420SemiPlanar (NV12) or compatible vendor formats
             let y_size = stride * slice_h;
-            let uv_size = stride * (slice_h / 2);
-            let expected = y_size + uv_size;
+            let uv_h = h / 2;
+            let uv_crop_top = crop_top as usize / 2;
+            // Buffer has Y plane padded to slice_h then UV plane.
+            // Some decoders only fill visible chroma rows (uv_h), not all slice_h/2 rows,
+            // so check against visible chroma extent rather than full padded uv_size.
+            let expected = y_size + uv_h * stride;
             if raw.len() < expected {
                 return Err(Error::Platform(format!(
                     "NV12 buffer too small: {} < {}",
@@ -181,8 +185,6 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
                 out_y[dst_start..dst_start + w].copy_from_slice(&raw[src_start..src_start + w]);
             }
             // UV plane (interleaved)
-            let uv_h = h / 2;
-            let uv_crop_top = crop_top as usize / 2;
             for row in 0..uv_h {
                 let src_start = y_size + (uv_crop_top + row) * stride + crop_l;
                 let dst_start = row * w;
@@ -198,9 +200,13 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
         19 | 2141391872 | 2130706688 => {
             // COLOR_FormatYUV420Planar (I420) or compatible vendor formats
             let y_size = stride * slice_h;
-            let u_size = stride / 2 * (slice_h / 2);
-            let v_size = u_size;
-            let expected = y_size + u_size + v_size;
+            let uv_stride = stride / 2;
+            let uv_h = h / 2;
+            // U and V planes each have slice_h/2 rows in the standard layout,
+            // but some decoders only fill visible chroma rows (uv_h).
+            let chroma_rows_per_plane = uv_h;
+            let u_size = uv_stride * chroma_rows_per_plane;
+            let expected = y_size + 2 * u_size;
             if raw.len() < expected {
                 return Err(Error::Platform(format!(
                     "I420 buffer too small: {} < {}",
@@ -213,6 +219,7 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
             let (out_u, out_v) = out_uv.split_at_mut(w * h / 4);
             let crop_l = crop_left as usize;
             let uv_crop_l = crop_l / 2;
+            let uv_crop_top = (crop_top / 2) as usize;
             // Y plane
             for row in 0..h {
                 let src_start = (crop_top as usize + row) * stride + crop_l;
@@ -220,17 +227,15 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
                 out_y[dst_start..dst_start + w].copy_from_slice(&raw[src_start..src_start + w]);
             }
             // U plane
-            let uv_stride = stride / 2;
-            let uv_h = h / 2;
             for row in 0..uv_h {
-                let src_start = y_size + (uv_crop_top(row as u32)) * uv_stride + uv_crop_l;
+                let src_start = y_size + (uv_crop_top + row) * uv_stride + uv_crop_l;
                 let dst_start = row * (w / 2);
                 out_u[dst_start..dst_start + w / 2]
                     .copy_from_slice(&raw[src_start..src_start + w / 2]);
             }
             // V plane
             for row in 0..uv_h {
-                let src_start = y_size + u_size + (uv_crop_top(row as u32)) * uv_stride + uv_crop_l;
+                let src_start = y_size + u_size + (uv_crop_top + row) * uv_stride + uv_crop_l;
                 let dst_start = row * (w / 2);
                 out_v[dst_start..dst_start + w / 2]
                     .copy_from_slice(&raw[src_start..src_start + w / 2]);
@@ -246,11 +251,6 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
             "unsupported MediaCodec color-format: {other}"
         ))),
     }
-}
-
-/// Helper: map crop_top for chroma planes (accounts for odd alignment).
-fn uv_crop_top(crop_top: u32) -> usize {
-    (crop_top / 2) as usize
 }
 
 fn drain_output(
