@@ -256,6 +256,9 @@ fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame
 fn drain_output(
     codec: &mut MediaCodec,
     frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
+    pts_base: &mut i64,
+    pts_frame_duration_us: i64,
+    output_count: &mut u64,
 ) -> usize {
     let mut count = 0;
     loop {
@@ -272,7 +275,15 @@ fn drain_output(
                 }
                 // success — decoded a frame
                 match output_to_frame(&out_buf) {
-                    Ok(frame) => {
+                    Ok(mut frame) => {
+                        if *pts_base == 0 && *output_count == 0 {
+                            *pts_base = frame.timestamp.as_micros() as i64;
+                        }
+                        let dur = pts_frame_duration_us.max(1);
+                        let corrected = *pts_base + (*output_count as i64) * dur;
+                        frame.timestamp = std::time::Duration::from_micros(corrected as u64);
+                        *output_count += 1;
+
                         if frame_tx.send(Ok(frame)).is_err() {
                             return count;
                         }
@@ -310,6 +321,13 @@ fn decode_loop(
         std::collections::VecDeque::new();
     let mut in_flight: u32 = 0;
 
+    // MediaCodec returns decode-order PTS. We have to replace it with 
+    // a linear ramp based on output position.
+    let mut pts_base: i64 = 0;
+    let mut pts_frame_duration_us: i64 = 0;
+    let mut output_count: u64 = 0;
+    let mut prev_input_pts: Option<i64> = None;
+
     info!("decode_loop started");
 
     loop {
@@ -318,16 +336,31 @@ fn decode_loop(
         if pending.is_empty() && in_flight == 0 {
             match cmd_rx.blocking_recv() {
                 Some(Cmd::Item(pkt)) => {
+                    track_frame_duration(&pkt, &mut pts_frame_duration_us, &mut prev_input_pts);
                     pending.push_back(pkt);
                 }
                 Some(Cmd::Flush(done)) => {
-                    let res =
-                        handle_flush(&mut codec, &mut pending, &frame_tx, &queue, &mut in_flight);
+                    let res = handle_flush(
+                        &mut codec,
+                        &mut pending,
+                        &frame_tx,
+                        &queue,
+                        &mut in_flight,
+                        &mut pts_base,
+                        pts_frame_duration_us,
+                        &mut output_count,
+                    );
                     let _ = done.send(res);
                 }
                 Some(Cmd::Close) | None => {
                     info!("decode_loop: close");
-                    drain_output(&mut codec, &frame_tx);
+                    drain_output(
+                        &mut codec,
+                        &frame_tx,
+                        &mut pts_base,
+                        pts_frame_duration_us,
+                        &mut output_count,
+                    );
                     queue.store(0, Ordering::Relaxed);
                     return;
                 }
@@ -337,6 +370,11 @@ fn decode_loop(
             loop {
                 match cmd_rx.try_recv() {
                     Ok(Cmd::Item(pkt)) => {
+                        track_frame_duration(
+                            &pkt,
+                            &mut pts_frame_duration_us,
+                            &mut prev_input_pts,
+                        );
                         pending.push_back(pkt);
                     }
                     Ok(Cmd::Flush(done)) => {
@@ -346,12 +384,21 @@ fn decode_loop(
                             &frame_tx,
                             &queue,
                             &mut in_flight,
+                            &mut pts_base,
+                            pts_frame_duration_us,
+                            &mut output_count,
                         );
                         let _ = done.send(res);
                     }
                     Ok(Cmd::Close) | Err(mpsc::error::TryRecvError::Disconnected) => {
                         info!("decode_loop: close (non-blocking)");
-                        drain_output(&mut codec, &frame_tx);
+                        drain_output(
+                            &mut codec,
+                            &frame_tx,
+                            &mut pts_base,
+                            pts_frame_duration_us,
+                            &mut output_count,
+                        );
                         queue.store(0, Ordering::Relaxed);
                         return;
                     }
@@ -364,7 +411,13 @@ fn decode_loop(
         if let Ok(submitted) = submit_pending(&mut codec, &mut pending, &queue) {
             in_flight = in_flight.saturating_add(submitted as u32);
         }
-        let produced = drain_output(&mut codec, &frame_tx);
+        let produced = drain_output(
+            &mut codec,
+            &frame_tx,
+            &mut pts_base,
+            pts_frame_duration_us,
+            &mut output_count,
+        );
         in_flight = in_flight.saturating_sub(produced as u32);
 
         // Brief sleep when work is in-flight but nothing progressed
@@ -375,10 +428,33 @@ fn decode_loop(
         // Exit cleanly when sender is dropped and all work is done
         if cmd_rx.is_closed() && pending.is_empty() && in_flight == 0 {
             info!("decode_loop: closed+empty");
-            drain_output(&mut codec, &frame_tx);
+            drain_output(
+                &mut codec,
+                &frame_tx,
+                &mut pts_base,
+                pts_frame_duration_us,
+                &mut output_count,
+            );
             queue.store(0, Ordering::Relaxed);
             return;
         }
+    }
+}
+
+/// Derive frame duration from the delta between consecutive input PTS values.
+fn track_frame_duration(
+    pkt: &EncodedVideoPacket,
+    pts_frame_duration_us: &mut i64,
+    prev_input_pts: &mut Option<i64>,
+) {
+    if *pts_frame_duration_us == 0 {
+        let cur = pkt.timestamp.as_micros() as i64;
+        if let Some(prev) = *prev_input_pts {
+            if cur > prev {
+                *pts_frame_duration_us = cur - prev;
+            }
+        }
+        *prev_input_pts = Some(cur);
     }
 }
 
@@ -388,11 +464,14 @@ fn handle_flush(
     frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
     queue: &std::sync::Arc<std::sync::atomic::AtomicU32>,
     in_flight: &mut u32,
+    pts_base: &mut i64,
+    pts_frame_duration_us: i64,
+    output_count: &mut u64,
 ) -> Result<(), Error> {
     info!("decode_loop: flush start, pending={}", pending.len());
 
     // Drain any currently available output first
-    let produced = drain_output(codec, frame_tx);
+    let produced = drain_output(codec, frame_tx, pts_base, pts_frame_duration_us, output_count);
     *in_flight = in_flight.saturating_sub(produced as u32);
 
     for _ in 0..5000 {
@@ -402,7 +481,7 @@ fn handle_flush(
         if let Ok(submitted) = submit_pending(codec, pending, queue) {
             *in_flight = in_flight.saturating_add(submitted as u32);
         }
-        let produced = drain_output(codec, frame_tx);
+        let produced = drain_output(codec, frame_tx, pts_base, pts_frame_duration_us, output_count);
         *in_flight = in_flight.saturating_sub(produced as u32);
         if !pending.is_empty() {
             thread::sleep(std::time::Duration::from_millis(1));
@@ -415,7 +494,14 @@ fn handle_flush(
     info!("decode_loop: flush sending EOS");
     cmd::send_eos(codec)?;
     cmd::drain_until_eos(codec, |out| {
-        let frame = output_to_frame(&out)?;
+        let mut frame = output_to_frame(&out)?;
+        if *pts_base == 0 && *output_count == 0 {
+            *pts_base = frame.timestamp.as_micros() as i64;
+        }
+        let dur = pts_frame_duration_us.max(1);
+        let corrected = *pts_base + (*output_count as i64) * dur;
+        frame.timestamp = std::time::Duration::from_micros(corrected as u64);
+        *output_count += 1;
         frame_tx.send(Ok(frame)).map_err(|_| Error::Dropped)
     })?;
 
@@ -424,6 +510,8 @@ fn handle_flush(
         .map_err(|e| Error::Platform(format!("{e:?}")))?;
 
     *in_flight = 0;
+    *pts_base = 0;
+    *output_count = 0;
     info!("decode_loop: flush done");
     Ok(())
 }
