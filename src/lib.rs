@@ -11,7 +11,7 @@ pub use traits::{
     VideoDecoderInput, VideoDecoderOutput, VideoEncoderInput, VideoEncoderOutput,
 };
 pub use types::{
-    AudioCodecId, AudioDecoderConfig, AudioEncoderConfig, AudioFrame, Dimensions,
-    EncodedAudioPacket, EncodedVideoPacket, PixelFormat, SampleFormat, Timestamp, VideoCodecId,
-    VideoDecoderConfig, VideoEncoderConfig, VideoFrame, VideoPlanes,
+    AudioCodecId, AudioDecoderConfig, AudioEncoderConfig, AudioFrame, AvcBitstreamFormat,
+    Dimensions, EncodedAudioPacket, EncodedVideoPacket, PixelFormat, SampleFormat, Timestamp,
+    VideoCodecId, VideoDecoderConfig, VideoEncoderConfig, VideoFrame, VideoPlanes,
 };
