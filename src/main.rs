@@ -20,6 +20,7 @@ fn main() {
         level: None,
         hardware_acceleration: None,
         latency_optimized: None,
+        avc_bitstream_format: None,
     };
 
     println!("Decoder codec:  {}", dec_config.codec);

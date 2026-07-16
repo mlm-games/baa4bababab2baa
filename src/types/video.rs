@@ -87,6 +87,15 @@ impl From<&str> for VideoCodecId {
     }
 }
 
+/// Maps to `VideoEncoderConfig.avc.format` in WebCodecs on WASM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvcBitstreamFormat {
+    /// Annex-B format with start codes (0x00000001). Preferred by many pipelines.
+    AnnexB,
+    /// AVCC format with 4-byte length prefixes. Default for most WebCodecs encoders.
+    Avc,
+}
+
 #[derive(Debug, Clone)]
 pub struct VideoEncoderConfig {
     pub codec: VideoCodecId,
@@ -96,6 +105,8 @@ pub struct VideoEncoderConfig {
     pub hardware_acceleration: Option<bool>,
     pub latency_optimized: Option<bool>,
     pub level: Option<u32>,
+    /// Request the encoder to use a specific H.264 bitstream format.
+    pub avc_bitstream_format: Option<AvcBitstreamFormat>,
 }
 
 impl Default for VideoEncoderConfig {
@@ -111,6 +122,7 @@ impl Default for VideoEncoderConfig {
             hardware_acceleration: None,
             latency_optimized: None,
             level: None,
+            avc_bitstream_format: None,
         }
     }
 }

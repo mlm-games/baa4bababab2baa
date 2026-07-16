@@ -8,8 +8,8 @@ use crate::{
     error::Error,
     traits::{VideoEncoderInput, VideoEncoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoEncoderConfig,
-        VideoFrame, VideoPlanes,
+        AvcBitstreamFormat, Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig,
+        VideoEncoderConfig, VideoFrame, VideoPlanes,
     },
 };
 
@@ -38,6 +38,12 @@ pub(super) fn to_wc_config(cfg: &VideoEncoderConfig) -> WcVideoEncoderConfig {
     }
     if let Some(lat) = cfg.latency_optimized {
         wc.latency_optimized = Some(lat);
+    }
+    if let Some(fmt) = cfg.avc_bitstream_format {
+        wc.avc_bitstream_format = Some(match fmt {
+            AvcBitstreamFormat::AnnexB => web_codecs::AvcBitstreamFormat::AnnexB,
+            AvcBitstreamFormat::Avc => web_codecs::AvcBitstreamFormat::Avc,
+        });
     }
 
     wc

@@ -7,6 +7,6 @@ pub use audio::{
 };
 pub use common::{Dimensions, PixelFormat, SampleFormat, Timestamp};
 pub use video::{
-    EncodedVideoPacket, VideoCodecId, VideoDecoderConfig, VideoEncoderConfig, VideoFrame,
-    VideoPlanes,
+    AvcBitstreamFormat, EncodedVideoPacket, VideoCodecId, VideoDecoderConfig, VideoEncoderConfig,
+    VideoFrame, VideoPlanes,
 };
