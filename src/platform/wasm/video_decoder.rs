@@ -146,18 +146,23 @@ pub fn create(
     let candidates = config.codec.to_webcodecs_strings();
     let mut last_err = None;
 
-    for codec_str in candidates {
-        let mut wc_cfg = to_wc_config(&config);
-        wc_cfg.codec = codec_str.to_string();
+    let try_hw = config.hardware_acceleration;
 
-        match wc_cfg.build() {
-            Ok((dec, decoded)) => {
-                return Ok((
-                    WasmVideoDecoderInput { inner: dec },
-                    WasmVideoDecoderOutput { inner: decoded },
-                ));
+    for &prefer_hw in &[try_hw, Some(false), None] {
+        for codec_str in &candidates {
+            let mut wc_cfg = to_wc_config(&config);
+            wc_cfg.codec = codec_str.to_string();
+            wc_cfg.hardware_acceleration = prefer_hw;
+
+            match wc_cfg.build() {
+                Ok((dec, decoded)) => {
+                    return Ok((
+                        WasmVideoDecoderInput { inner: dec },
+                        WasmVideoDecoderOutput { inner: decoded },
+                    ));
+                }
+                Err(e) => last_err = Some(e),
             }
-            Err(e) => last_err = Some(e),
         }
     }
 

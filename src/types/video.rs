@@ -55,8 +55,18 @@ impl VideoCodecId {
     /// Multiple strings are returned for H.264/HEVC to try different profile/level combinations.
     pub fn to_webcodecs_strings(&self) -> Vec<&str> {
         match self {
-            VideoCodecId::H264 { .. } => vec!["avc1.42001E", "avc1.4D001E", "avc1.64001E"],
-            VideoCodecId::Hevc => vec!["hvc1.1.6.L93.B0", "hev1.1.6.L93.B0"],
+            VideoCodecId::H264 { .. } => vec![
+                "avc1.42001E", "avc1.42E01E", "avc1.4D001E", "avc1.4D401E",
+                "avc1.64001E", "avc1.640028", "avc1.640032",
+            ],
+            VideoCodecId::Hevc => vec![
+                "hvc1.1.6.L93.B0",   "hev1.1.6.L93.B0",
+                "hvc1.1.6.L120.B0",  "hev1.1.6.L120.B0",
+                "hvc1.1.6.L123.B0",  "hev1.1.6.L123.B0",
+                "hvc1.1.6.L150.B0",  "hev1.1.6.L150.B0",
+                "hvc1.1.6.L153.B0",  "hev1.1.6.L153.B0",
+                "hvc1.2.4.L120.B0",  "hev1.2.4.L120.B0",
+            ],
             VideoCodecId::Av1 => vec!["av01.0.04M.08"],
             VideoCodecId::Vp9 => vec!["vp09.00.10.08"],
             VideoCodecId::Vp8 => vec!["vp8"],

@@ -1,3 +1,4 @@
+use js_sys;
 use web_codecs::{
     Dimensions as WcDimensions, EncodedFrame, VideoEncodeOptions, VideoEncoded, VideoEncoder,
     VideoEncoderConfig as WcVideoEncoderConfig,
@@ -81,6 +82,13 @@ impl VideoEncoderInput for WasmVideoEncoderInput {
 
     fn config(&self) -> &VideoEncoderConfig {
         &self.config
+    }
+}
+
+impl WasmVideoEncoderInput {
+    /// Start an async flush without waiting.
+    pub fn start_flush(&mut self) -> js_sys::Promise {
+        self.inner.start_flush()
     }
 }
 
