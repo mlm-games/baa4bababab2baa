@@ -144,12 +144,13 @@ pub fn create(
     config: VideoDecoderConfig,
 ) -> Result<(WasmVideoDecoderInput, WasmVideoDecoderOutput), Error> {
     let candidates = config.codec.to_webcodecs_strings();
+    let mime = config.codec.to_mime();
     let mut last_err = None;
 
     let try_hw = config.hardware_acceleration;
 
-    for &prefer_hw in &[try_hw, Some(false), None] {
-        for codec_str in &candidates {
+    for &prefer_hw in &[try_hw, Some(false)] {
+        for codec_str in std::iter::once(mime).chain(candidates.iter().copied()) {
             let mut wc_cfg = to_wc_config(&config);
             wc_cfg.codec = codec_str.to_string();
             wc_cfg.hardware_acceleration = prefer_hw;
