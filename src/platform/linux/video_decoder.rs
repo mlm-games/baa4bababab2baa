@@ -10,13 +10,14 @@ use crate::{
     error::Error,
     traits::{VideoDecoderInput, VideoDecoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, PixelFormat, Timestamp, VideoDecoderConfig, VideoFrame,
+        video::HardwareBufferInner, Dimensions, DmaBufFrame, DmaBufPlane, EncodedVideoPacket,
+        HardwareBuffer, PixelFormat, Timestamp, VideoDecoderConfig, VideoFrame, VideoOutputMode,
         VideoPlanes,
     },
 };
 
 use cros_codecs::{
-    BlockingMode, EncodedFormat, Fourcc, FrameLayout, PlaneLayout, Resolution,
+    BlockingMode, DecodedFormat, EncodedFormat, Fourcc, FrameLayout, PlaneLayout, Resolution,
     decoder::stateless::{
         DecodeError, DynStatelessVideoDecoder, StatelessDecoder, StatelessVideoDecoder,
     },
@@ -93,6 +94,7 @@ pub fn create(
     config: VideoDecoderConfig,
 ) -> Result<(CrosVideoDecoderInput, CrosVideoDecoderOutput), Error> {
     let codec = config.codec.clone();
+    let output_mode = config.output_mode;
     let fmt = codec_to_fmt(&codec).map_err(|e| Error::Platform(e))?;
 
     // Open VA display and validate codec support synchronously (for easier fallback)
@@ -108,7 +110,7 @@ pub fn create(
     let queue = Arc::new(AtomicU32::new(0));
 
     let queue2 = queue.clone();
-    thread::spawn(move || worker_loop(cmd_rx, frame_tx, queue2, codec, va_display));
+    thread::spawn(move || worker_loop(cmd_rx, frame_tx, queue2, codec, va_display, output_mode));
 
     Ok((
         CrosVideoDecoderInput { tx: cmd_tx, queue },
@@ -217,6 +219,7 @@ fn worker_loop(
     queue: Arc<AtomicU32>,
     codec: crate::types::VideoCodecId,
     va_display: Arc<libva::Display>,
+    output_mode: VideoOutputMode,
 ) {
     let mut frame_queue: Vec<GenericDmaVideoFrame> = Vec::new();
     let mut decoder: Option<DynStatelessVideoDecoder<GenericDmaVideoFrame>> = None;
@@ -267,6 +270,7 @@ fn worker_loop(
                             &mut cached_h,
                             &mut cached_display,
                             &mut cached_format,
+                            output_mode,
                         )?;
                     }
                     Ok(())
@@ -324,6 +328,7 @@ fn worker_loop(
                             &mut cached_h,
                             &mut cached_display,
                             &mut cached_format,
+                            output_mode,
                         )?;
                     }
 
@@ -351,6 +356,7 @@ fn drain_events<F: CcVideoFrame + 'static>(
     cached_h: &mut u32,
     cached_display: &mut Resolution,
     cached_format: &mut cros_codecs::DecodedFormat,
+    output_mode: VideoOutputMode,
 ) -> Result<usize, Error> {
     let mut count = 0;
     while let Some(ev) = dec.next_event() {
@@ -376,21 +382,21 @@ fn drain_events<F: CcVideoFrame + 'static>(
                 let ts = Timestamp::from_micros(handle.timestamp());
 
                 let frame_arc = handle.video_frame();
-                let out = match *cached_format {
-                    cros_codecs::DecodedFormat::I010
-                    | cros_codecs::DecodedFormat::I210
-                    | cros_codecs::DecodedFormat::I410 => p010_frame_to_i010(&*frame_arc, ts),
-                    _ => nv12_frame_to_i420(&*frame_arc, ts).or_else(|e| {
-                        eprintln!(
-                            "[VAAPI] nv12_frame_to_i420 failed: {e:?}, trying VA-API fallback"
-                        );
-                        nv12_frame_to_i420_via_vaapi(&*frame_arc, ts, va_display)
-                    }),
-                }
-                .map_err(|e| {
-                    eprintln!("[VAAPI] drain_events FrameReady failed: {e:?}");
-                    e
-                })?;
+                let out = match output_mode {
+                    VideoOutputMode::PreferHardware | VideoOutputMode::HardwareOnly => {
+                        match gdma_to_hardware(&*frame_arc, ts, *cached_format) {
+                            Ok(f) => f,
+                            Err(e) if matches!(output_mode, VideoOutputMode::PreferHardware) => {
+                                eprintln!("[VAAPI] gdma_to_hardware failed: {e:?}, falling back to CPU");
+                                cpu_path(&*frame_arc, ts, *cached_format, va_display)?
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    VideoOutputMode::Cpu => {
+                        cpu_path(&*frame_arc, ts, *cached_format, va_display)?
+                    }
+                };
                 frame_tx.send(Ok(out)).map_err(|_| Error::Dropped)?;
                 count += 1;
 
@@ -407,6 +413,128 @@ fn drain_events<F: CcVideoFrame + 'static>(
         }
     }
     Ok(count)
+}
+
+fn cpu_path<F: CcVideoFrame + 'static>(
+    frame: &F,
+    ts: Timestamp,
+    fmt: cros_codecs::DecodedFormat,
+    va_display: &Arc<libva::Display>,
+) -> Result<VideoFrame, Error> {
+    match fmt {
+        DecodedFormat::I010 | DecodedFormat::I210 | DecodedFormat::I410 => {
+            p010_frame_to_i010(frame, ts)
+        }
+        _ => nv12_frame_to_i420(frame, ts).or_else(|e| {
+            eprintln!("[VAAPI] nv12_frame_to_i420 failed: {e:?}, trying VA-API fallback");
+            nv12_frame_to_i420_via_vaapi(frame, ts, va_display)
+        }),
+    }
+}
+
+fn gdma_to_hardware<F: CcVideoFrame + 'static>(
+    frame: &F,
+    timestamp: Timestamp,
+    decoded_fmt: DecodedFormat,
+) -> Result<VideoFrame, Error> {
+    let gdma = (frame as &dyn std::any::Any)
+        .downcast_ref::<GenericDmaVideoFrame>()
+        .ok_or_else(|| Error::Platform("not GenericDmaVideoFrame".into()))?;
+
+    let (fds, layout) = gdma
+        .export_dmabuf()
+        .map_err(|e| Error::Platform(e))?;
+
+    let pixel = match decoded_fmt {
+        DecodedFormat::NV12 | DecodedFormat::MM21 => PixelFormat::Nv12,
+        _ => PixelFormat::Yuv420p,
+    };
+
+    let planes = layout
+        .planes
+        .iter()
+        .map(|p| DmaBufPlane {
+            buffer_index: p.buffer_index,
+            offset: p.offset,
+            stride: p.stride,
+        })
+        .collect();
+
+    Ok(VideoFrame {
+        dimensions: Dimensions {
+            width: layout.size.width,
+            height: layout.size.height,
+        },
+        format: pixel,
+        timestamp,
+        planes: VideoPlanes::Hardware(HardwareBuffer {
+            inner: HardwareBufferInner::DmaBuf(DmaBufFrame {
+                fds,
+                fourcc: u32::from(layout.format.0),
+                modifier: layout.format.1,
+                width: layout.size.width,
+                height: layout.size.height,
+                planes,
+            }),
+        }),
+    })
+}
+
+pub(crate) fn dmabuf_copy_to_cpu(
+    hw: &HardwareBuffer,
+    _fmt: PixelFormat,
+    _w: u32,
+    _h: u32,
+) -> Result<(PixelFormat, Vec<u8>), Error> {
+    let d = hw.as_dmabuf().ok_or(Error::Unsupported)?;
+    let layout = FrameLayout {
+        format: (Fourcc::from(d.fourcc), d.modifier),
+        size: Resolution {
+            width: d.width,
+            height: d.height,
+        },
+        planes: d
+            .planes
+            .iter()
+            .map(|p| PlaneLayout {
+                buffer_index: p.buffer_index,
+                offset: p.offset,
+                stride: p.stride,
+            })
+            .collect(),
+    };
+    let fds: Vec<std::fs::File> = d
+        .fds
+        .iter()
+        .map(|f| f.try_clone().map_err(|e| Error::Platform(e.to_string())))
+        .collect::<Result<_, _>>()?;
+    let gf = GenericDmaVideoFrame::new(fds, layout)
+        .map_err(|e| Error::Platform(e))?;
+    let v = nv12_frame_to_nv12_packed(&gf)?;
+    Ok((PixelFormat::Nv12, v))
+}
+
+fn nv12_frame_to_nv12_packed<F: CcVideoFrame>(frame: &F) -> Result<Vec<u8>, Error> {
+    let res = frame.resolution();
+    let w = res.width as usize;
+    let h = res.height as usize;
+    let mut out = vec![0u8; w * h * 3 / 2];
+    let (dst_y, dst_uv) = out.split_at_mut(w * h);
+    let pitches = frame.get_plane_pitch();
+    let mapping = frame.map().map_err(|e| Error::Platform(format!("{e:?}")))?;
+    let planes = mapping.get();
+    let y_pitch = pitches[Y_PLANE];
+    let uv_pitch = pitches[UV_PLANE];
+    for row in 0..h {
+        let s = row * y_pitch;
+        dst_y[row * w..row * w + w].copy_from_slice(&planes[Y_PLANE][s..s + w]);
+    }
+    let uv_h = h.div_ceil(2);
+    for row in 0..uv_h {
+        let s = row * uv_pitch;
+        dst_uv[row * w..row * w + w].copy_from_slice(&planes[UV_PLANE][s..s + w]);
+    }
+    Ok(out)
 }
 
 fn rt_format_from_format(format: cros_codecs::DecodedFormat) -> u32 {

@@ -4,7 +4,7 @@ use crate::{
 };
 
 mod audio;
-mod video_decoder;
+pub(crate) mod video_decoder;
 mod video_encoder;
 
 pub use audio::{

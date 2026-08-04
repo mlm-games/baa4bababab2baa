@@ -307,8 +307,8 @@ impl Host {
         _config: VideoDecoderConfig,
     ) -> Result<
         (
-            impl crate::traits::VideoDecoderInput,
-            impl crate::traits::VideoDecoderOutput,
+            impl crate::traits::VideoDecoderInput + use<>,
+            impl crate::traits::VideoDecoderOutput + use<>,
         ),
         Error,
     > {

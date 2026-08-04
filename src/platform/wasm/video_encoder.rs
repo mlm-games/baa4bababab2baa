@@ -8,8 +8,8 @@ use crate::{
     error::Error,
     traits::{VideoEncoderInput, VideoEncoderOutput},
     types::{
-        AvcBitstreamFormat, Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig,
-        VideoEncoderConfig, VideoFrame, VideoPlanes,
+        AvcBitstreamFormat, Dimensions, EncodedVideoPacket, PixelFormat, VideoColorSpace,
+        VideoDecoderConfig, VideoEncoderConfig, VideoFrame, VideoOutputMode, VideoPlanes,
     },
 };
 
@@ -57,7 +57,7 @@ pub struct WasmVideoEncoderInput {
 impl VideoEncoderInput for WasmVideoEncoderInput {
     fn encode(&mut self, frame: VideoFrame, keyframe: Option<bool>) -> Result<(), Error> {
         let wc_frame: web_codecs::VideoFrame = match frame.planes {
-            VideoPlanes::Hardware => {
+            VideoPlanes::Hardware(_) => {
                 return Err(Error::InvalidConfig(
                     "Cannot re-encode a hardware VideoFrame on WASM".into(),
                 ));
@@ -145,6 +145,7 @@ impl WasmVideoEncoderOutput {
                     .map(|d| Dimensions::new(d.width, d.height)),
                 description: wc_cfg.description.clone(),
                 hardware_acceleration: wc_cfg.hardware_acceleration,
+                output_mode: VideoOutputMode::Cpu,
             });
         }
         EncodedVideoPacket {

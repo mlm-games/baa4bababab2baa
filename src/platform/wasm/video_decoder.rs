@@ -6,7 +6,8 @@ use crate::{
     error::Error,
     traits::{VideoDecoderInput, VideoDecoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoFrame, VideoPlanes,
+        video::HardwareBufferInner, Dimensions, EncodedVideoPacket, HardwareBuffer, PixelFormat,
+        VideoDecoderConfig, VideoFrame, VideoOutputMode, VideoPlanes,
     },
 };
 
@@ -40,7 +41,7 @@ fn to_our_pixel_format(fmt: web_sys::VideoPixelFormat) -> PixelFormat {
     }
 }
 
-fn to_our_frame(f: web_codecs::VideoFrame) -> VideoFrame {
+fn to_our_frame_hw(f: web_codecs::VideoFrame) -> VideoFrame {
     let dims = f.dimensions();
     let ts = f.timestamp();
     let fmt = f
@@ -51,8 +52,29 @@ fn to_our_frame(f: web_codecs::VideoFrame) -> VideoFrame {
         dimensions: Dimensions::new(dims.width, dims.height),
         format: fmt,
         timestamp: ts,
-        planes: VideoPlanes::Hardware,
+        planes: VideoPlanes::Hardware(HardwareBuffer {
+            inner: HardwareBufferInner::WebCodecs(f),
+        }),
     }
+}
+
+async fn to_our_frame_copied(f: web_codecs::VideoFrame) -> Result<VideoFrame, Error> {
+    let dims = f.dimensions();
+    let ts = f.timestamp();
+    let fmt = f
+        .format()
+        .map(to_our_pixel_format)
+        .unwrap_or(PixelFormat::Nv12);
+    let data = f
+        .copy_to_cpu()
+        .await
+        .map_err(|e| Error::Platform(format!("copy_to_cpu: {e:?}")))?;
+    Ok(VideoFrame {
+        dimensions: Dimensions::new(dims.width, dims.height),
+        format: fmt,
+        timestamp: ts,
+        planes: VideoPlanes::Cpu(data),
+    })
 }
 
 pub struct WasmVideoDecoderInput {
@@ -85,26 +107,7 @@ impl VideoDecoderInput for WasmVideoDecoderInput {
 
 pub struct WasmVideoDecoderOutput {
     inner: VideoDecoded,
-}
-
-/// Async version of `to_our_frame` that copies GPU pixel data to CPU memory
-async fn to_our_frame_copied(f: web_codecs::VideoFrame) -> Result<VideoFrame, Error> {
-    let dims = f.dimensions();
-    let ts = f.timestamp();
-    let fmt = f
-        .format()
-        .map(to_our_pixel_format)
-        .unwrap_or(PixelFormat::Nv12);
-    let data = f
-        .copy_to_cpu()
-        .await
-        .map_err(|e| Error::Platform(format!("copy_to_cpu: {e:?}")))?;
-    Ok(VideoFrame {
-        dimensions: Dimensions::new(dims.width, dims.height),
-        format: fmt,
-        timestamp: ts,
-        planes: VideoPlanes::Cpu(data),
-    })
+    output_mode: VideoOutputMode,
 }
 
 impl VideoDecoderOutput for WasmVideoDecoderOutput {
@@ -114,24 +117,34 @@ impl VideoDecoderOutput for WasmVideoDecoderOutput {
             other => Error::Platform(format!("{other:?}")),
         })?;
         match frame {
-            Some(f) => Ok(Some(to_our_frame_copied(f).await?)),
+            Some(f) => match self.output_mode {
+                VideoOutputMode::Cpu => Ok(Some(to_our_frame_copied(f).await?)),
+                _ => Ok(Some(to_our_frame_hw(f))),
+            },
             None => Ok(None),
         }
     }
 
     fn try_frame(&mut self) -> Result<Option<VideoFrame>, Error> {
-        // Pixel data from web_codecs::VideoFrame can only be obtained
-        // asynchronously (via copy_to_cpu). Use try_frame_raw() to get
-        // the raw web_codecs::VideoFrame, then call copy_to_cpu() on it.
-        Err(Error::InvalidConfig(
-            "try_frame() is not supported on wasm; use try_frame_raw() instead".into(),
-        ))
+        match self.output_mode {
+            VideoOutputMode::Cpu => Err(Error::InvalidConfig(
+                "try_frame() with Cpu output is not supported on wasm; use frame() for async copy".into(),
+            )),
+            _ => {
+                let frame = self.inner.try_recv().map_err(|e| match e {
+                    web_codecs::Error::Dropped => Error::Dropped,
+                    other => Error::Platform(format!("{other:?}")),
+                })?;
+                Ok(frame.map(to_our_frame_hw))
+            }
+        }
     }
 }
 
 impl WasmVideoDecoderOutput {
-    /// Returns the raw `web_codecs::VideoFrame` without converting to [`VideoPlanes::Hardware`]. The caller can copy the
-    /// pixel data to CPU memory later via [`web_codecs::VideoFrame::copy_to_cpu`].
+    /// Returns the raw `web_codecs::VideoFrame` without converting to [`VideoPlanes::Hardware`].
+    /// The caller can copy the pixel data to CPU memory later via
+    /// [`web_codecs::VideoFrame::copy_to_cpu`].
     pub fn try_frame_raw(&mut self) -> Result<Option<web_codecs::VideoFrame>, Error> {
         self.inner.try_recv().map_err(|e| match e {
             web_codecs::Error::Dropped => Error::Dropped,
@@ -148,6 +161,7 @@ pub fn create(
     let mut last_err = None;
 
     let try_hw = config.hardware_acceleration;
+    let output_mode = config.output_mode;
 
     for &prefer_hw in &[try_hw, Some(false)] {
         for codec_str in std::iter::once(mime).chain(candidates.iter().copied()) {
@@ -159,7 +173,7 @@ pub fn create(
                 Ok((dec, decoded)) => {
                     return Ok((
                         WasmVideoDecoderInput { inner: dec },
-                        WasmVideoDecoderOutput { inner: decoded },
+                        WasmVideoDecoderOutput { inner: decoded, output_mode },
                     ));
                 }
                 Err(e) => last_err = Some(e),

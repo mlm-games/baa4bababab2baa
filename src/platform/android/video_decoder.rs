@@ -10,7 +10,8 @@ use crate::{
     error::Error,
     traits::{VideoDecoderInput, VideoDecoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoFrame, VideoPlanes,
+        Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoFrame,
+        VideoOutputMode, VideoPlanes,
     },
 };
 
@@ -68,6 +69,13 @@ impl VideoDecoderOutput for AndroidVideoDecoderOutput {
 pub fn create(
     config: VideoDecoderConfig,
 ) -> Result<(AndroidVideoDecoderInput, AndroidVideoDecoderOutput), Error> {
+    // Surface path needs ImageReader/NativeWindow — not wired yet.
+    if matches!(config.output_mode, VideoOutputMode::HardwareOnly) {
+        return Err(Error::InvalidConfig(
+            "Android HardwareOnly needs a NativeWindow/ImageReader path (not wired yet)".into(),
+        ));
+    }
+
     let mut format =
         MediaFormat::new().map_err(|_| Error::Platform("Failed to create MediaFormat".into()))?;
     let _ = format.set_string("mime", config.codec.to_mime());

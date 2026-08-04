@@ -1,4 +1,4 @@
-use baabaabaabaabababbababbaa::{Dimensions, VideoDecoderConfig, VideoEncoderConfig, default_host};
+use baabaabaabaabababbababbaa::{Dimensions, VideoDecoderConfig, VideoEncoderConfig, VideoOutputMode, default_host};
 
 fn main() {
     let _host = default_host();
@@ -10,6 +10,7 @@ fn main() {
         resolution: Some(Dimensions::new(1920, 1080)),
         description: None,
         hardware_acceleration: None,
+        output_mode: VideoOutputMode::Cpu,
     };
 
     let enc_config = VideoEncoderConfig {
@@ -21,6 +22,7 @@ fn main() {
         hardware_acceleration: None,
         latency_optimized: None,
         avc_bitstream_format: None,
+        color_space: None,
     };
 
     println!("Decoder codec:  {}", dec_config.codec);

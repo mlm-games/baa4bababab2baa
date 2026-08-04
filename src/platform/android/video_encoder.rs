@@ -15,8 +15,8 @@ use crate::{
     error::Error,
     traits::{VideoEncoderInput, VideoEncoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, VideoDecoderConfig, VideoEncoderConfig, VideoFrame,
-        VideoPlanes,
+        Dimensions, EncodedVideoPacket, VideoColorSpace, VideoDecoderConfig, VideoEncoderConfig,
+        VideoFrame, VideoOutputMode, VideoPlanes,
     },
 };
 
@@ -93,6 +93,17 @@ pub fn create(
     }
     let _ = format.set_i32("i-frame-interval", 1);
     let _ = format.set_i32("color-format", 21); // COLOR_FormatYUV420SemiPlanar (NV12)
+
+    if let Some(color_space) = config.color_space {
+        let (standard, transfer) = match color_space {
+            VideoColorSpace::Bt601 => (6, 3), // COLOR_STANDARD_BT601_PAL, SDR_VIDEO
+            VideoColorSpace::Bt709 => (1, 3), // COLOR_STANDARD_BT709, SDR_VIDEO
+            VideoColorSpace::Bt2020 => (9, 3), // COLOR_STANDARD_BT2020, SDR_VIDEO
+        };
+        let _ = format.set_i32("color-standard", standard);
+        let _ = format.set_i32("color-transfer", transfer);
+        let _ = format.set_i32("color-range", 1); // COLOR_RANGE_FULL
+    }
 
     info!(
         "encoder format: mime={}, {}x{}, bitrate={:?}, framerate={:?}, i-frame-interval=1, color-format=21",
@@ -393,6 +404,7 @@ fn drain_encoded_output(
                                 )),
                                 description: Some(bytes::Bytes::from(data)),
                                 hardware_acceleration: None,
+                                output_mode: VideoOutputMode::Cpu,
                             });
                         }
                     }

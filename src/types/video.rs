@@ -96,6 +96,18 @@ pub enum AvcBitstreamFormat {
     Avc,
 }
 
+/// Color matrix coefficients for the YUV data fed to the encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoColorSpace {
+    /// BT.601 (SD). Most compatible default; most platform encoders assume this.
+    #[default]
+    Bt601,
+    /// BT.709 (HD).
+    Bt709,
+    /// BT.2020 (HDR).
+    Bt2020,
+}
+
 #[derive(Debug, Clone)]
 pub struct VideoEncoderConfig {
     pub codec: VideoCodecId,
@@ -107,6 +119,9 @@ pub struct VideoEncoderConfig {
     pub level: Option<u32>,
     /// Request the encoder to use a specific H.264 bitstream format.
     pub avc_bitstream_format: Option<AvcBitstreamFormat>,
+    /// Color space of the YUV data. Used to signal color metadata in the
+    /// encoded bitstream where the platform supports it.
+    pub color_space: Option<VideoColorSpace>,
 }
 
 impl Default for VideoEncoderConfig {
@@ -123,8 +138,17 @@ impl Default for VideoEncoderConfig {
             latency_optimized: None,
             level: None,
             avc_bitstream_format: None,
+            color_space: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoOutputMode {
+    #[default]
+    Cpu,
+    PreferHardware,
+    HardwareOnly,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +157,7 @@ pub struct VideoDecoderConfig {
     pub resolution: Option<Dimensions>,
     pub description: Option<Bytes>,
     pub hardware_acceleration: Option<bool>,
+    pub output_mode: VideoOutputMode,
 }
 
 impl Default for VideoDecoderConfig {
@@ -144,7 +169,8 @@ impl Default for VideoDecoderConfig {
             },
             resolution: None,
             description: None,
-            hardware_acceleration: None,
+            hardware_acceleration: Some(true),
+            output_mode: VideoOutputMode::PreferHardware,
         }
     }
 }
@@ -167,5 +193,141 @@ pub struct VideoFrame {
 #[derive(Debug)]
 pub enum VideoPlanes {
     Cpu(Vec<u8>),
-    Hardware,
+    Hardware(HardwareBuffer),
+}
+
+impl VideoFrame {
+    pub fn is_hardware(&self) -> bool {
+        matches!(self.planes, VideoPlanes::Hardware(_))
+    }
+
+    pub fn ensure_cpu(&mut self) -> Result<(), crate::Error> {
+        if let VideoPlanes::Hardware(hw) = &self.planes {
+            let (fmt, data) = hw.copy_to_cpu(self.format, self.dimensions.width, self.dimensions.height)?;
+            self.format = fmt;
+            self.planes = VideoPlanes::Cpu(data);
+        }
+        Ok(())
+    }
+}
+
+pub struct HardwareBuffer {
+    pub(crate) inner: HardwareBufferInner,
+}
+
+impl fmt::Debug for HardwareBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.inner {
+            #[cfg(all(target_os = "linux", feature = "linux"))]
+            HardwareBufferInner::DmaBuf(d) => f
+                .debug_struct("DmaBuf")
+                .field("w", &d.width)
+                .field("h", &d.height)
+                .field("fourcc", &d.fourcc)
+                .field("modifier", &d.modifier)
+                .field("fds", &d.fds.len())
+                .finish(),
+            #[cfg(target_arch = "wasm32")]
+            HardwareBufferInner::WebCodecs(_) => f.write_str("WebCodecs(VideoFrame)"),
+            #[cfg(target_os = "android")]
+            HardwareBufferInner::MediaCodecSurface { .. } => {
+                f.write_str("MediaCodecSurface")
+            }
+            HardwareBufferInner::Unsupported => f.write_str("Unsupported"),
+        }
+    }
+}
+
+pub(crate) enum HardwareBufferInner {
+    #[cfg(all(target_os = "linux", feature = "linux"))]
+    DmaBuf(DmaBufFrame),
+    #[cfg(target_arch = "wasm32")]
+    WebCodecs(web_codecs::VideoFrame),
+    #[cfg(target_os = "android")]
+    MediaCodecSurface {
+        release: Option<Box<dyn FnOnce(bool) + Send>>,
+        render_on_drop: bool,
+    },
+    Unsupported,
+}
+
+#[cfg(all(target_os = "linux", feature = "linux"))]
+#[derive(Debug)]
+pub struct DmaBufFrame {
+    pub fds: Vec<std::fs::File>,
+    pub fourcc: u32,
+    pub modifier: u64,
+    pub width: u32,
+    pub height: u32,
+    pub planes: Vec<DmaBufPlane>,
+}
+
+#[cfg(all(target_os = "linux", feature = "linux"))]
+#[derive(Debug, Clone)]
+pub struct DmaBufPlane {
+    pub buffer_index: usize,
+    pub offset: usize,
+    pub stride: usize,
+}
+
+impl HardwareBuffer {
+    #[cfg(all(target_os = "linux", feature = "linux"))]
+    pub fn as_dmabuf(&self) -> Option<&DmaBufFrame> {
+        match &self.inner {
+            HardwareBufferInner::DmaBuf(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn as_web_video_frame(&self) -> Option<&web_codecs::VideoFrame> {
+        match &self.inner {
+            HardwareBufferInner::WebCodecs(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn into_web_video_frame(mut self) -> Option<web_codecs::VideoFrame> {
+        match std::mem::replace(&mut self.inner, HardwareBufferInner::Unsupported) {
+            HardwareBufferInner::WebCodecs(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    pub fn copy_to_cpu(&self, fmt: PixelFormat, w: u32, h: u32) -> Result<(PixelFormat, Vec<u8>), crate::Error> {
+        match &self.inner {
+            #[cfg(all(target_os = "linux", feature = "linux"))]
+            HardwareBufferInner::DmaBuf(_) => {
+                crate::platform::linux::video_decoder::dmabuf_copy_to_cpu(self, fmt, w, h)
+            }
+            _ => Err(crate::Error::Unsupported),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn copy_to_cpu_async(&self) -> Result<Vec<u8>, crate::Error> {
+        match &self.inner {
+            HardwareBufferInner::WebCodecs(f) => f
+                .copy_to_cpu()
+                .await
+                .map_err(|e| crate::Error::Platform(format!("copy_to_cpu: {e:?}"))),
+            _ => Err(crate::Error::Unsupported),
+        }
+    }
+}
+
+impl Drop for HardwareBuffer {
+    fn drop(&mut self) {
+        #[cfg(target_os = "android")]
+        if let HardwareBufferInner::MediaCodecSurface {
+            release,
+            render_on_drop,
+        } = &mut self.inner
+        {
+            if let Some(f) = release.take() {
+                f(*render_on_drop);
+            }
+        }
+    }
 }
