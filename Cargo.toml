@@ -2,6 +2,11 @@
 name = "baabaabaabaabababbababbaa"
 version = "0.1.4"
 edition = "2024"
+description = "Cross-platform hardware-accelerated video/audio codecs (WebCodecs, MediaCodec, VAAPI, VideoToolbox)"
+license = "MPL-2.0"
+repository = "https://github.com/mlm-games/baa4bababab2baa"
+keywords = ["codec", "video", "audio", "hardware", "webcodecs"]
+categories = ["multimedia", "wasm", "api-bindings"]
 
 [features]
 default = []
