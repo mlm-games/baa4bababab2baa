@@ -1,4 +1,6 @@
-use baabaabaabaabababbababbaa::{Dimensions, VideoDecoderConfig, VideoEncoderConfig, VideoOutputMode, default_host};
+use baabaabaabaabababbababbaa::{
+    Dimensions, VideoDecoderConfig, VideoEncoderConfig, VideoOutputMode, default_host,
+};
 
 fn main() {
     let _host = default_host();

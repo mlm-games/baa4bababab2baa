@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::thread;
 
-use mediacodec::{BufferFlag, MediaCodec, MediaFormat};
+use anodecs::{BufferFlag, MediaCodec, MediaFormat};
 use tokio::sync::{mpsc, oneshot};
 
 use super::cmd::{self, Cmd};
@@ -109,7 +109,7 @@ fn drain_pending_inputs(
 ) -> Result<(), Error> {
     while let Some(frame) = pending.pop_front() {
         if let Ok(buf) = codec.dequeue_input(0) {
-            let mut buf: mediacodec::CodecInputBuffer = buf;
+            let mut buf: anodecs::CodecInputBuffer = buf;
             let (ptr, cap): (*mut u8, usize) = buf.buffer();
             if frame.samples.len() > cap {
                 return Err(Error::Platform(format!(
@@ -137,7 +137,7 @@ fn drain_encoded_output(
     pkt_tx: &mpsc::UnboundedSender<Result<EncodedAudioPacket, Error>>,
 ) {
     while let Ok(out) = codec.dequeue_output(0) {
-        let out_buf: mediacodec::CodecOutputBuffer = out;
+        let out_buf: anodecs::CodecOutputBuffer = out;
         let info = out_buf.info();
         let is_key = false;
         let ts = std::time::Duration::from_micros(info.presentation_time_us as u64);

@@ -1,8 +1,8 @@
 use std::sync::atomic::Ordering;
 use std::thread;
 
+use anodecs::{BufferFlag, DequeueOutputError, MediaCodec, MediaFormat};
 use log::info;
-use mediacodec::{BufferFlag, DequeueOutputError, MediaCodec, MediaFormat};
 use tokio::sync::{mpsc, oneshot};
 
 use super::cmd::{self, Cmd};
@@ -136,7 +136,7 @@ pub fn create(
 
 /// Extract a [`VideoFrame`] from a MediaCodec output buffer, accounting for
 /// stride, slice-height, crop rectangle, and color format.
-fn output_to_frame(out_buf: &mediacodec::CodecOutputBuffer) -> Result<VideoFrame, Error> {
+fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, Error> {
     let fmt = out_buf.format();
     let raw = out_buf.buffer_slice().unwrap_or_default();
     let ts_us = out_buf.info().presentation_time_us;
@@ -272,7 +272,7 @@ fn drain_output(
     loop {
         match codec.dequeue_output(0) {
             Ok(out) => {
-                let out_buf: mediacodec::CodecOutputBuffer = out;
+                let out_buf: anodecs::CodecOutputBuffer = out;
                 let info = out_buf.info();
                 let flags = info.flags;
                 if BufferFlag::EndOfStream.is_contained_in(flags) {
@@ -329,7 +329,7 @@ fn decode_loop(
         std::collections::VecDeque::new();
     let mut in_flight: u32 = 0;
 
-    // MediaCodec returns decode-order PTS. We have to replace it with 
+    // MediaCodec returns decode-order PTS. We have to replace it with
     // a linear ramp based on output position.
     let mut pts_base: i64 = 0;
     let mut pts_frame_duration_us: i64 = 0;
@@ -378,11 +378,7 @@ fn decode_loop(
             loop {
                 match cmd_rx.try_recv() {
                     Ok(Cmd::Item(pkt)) => {
-                        track_frame_duration(
-                            &pkt,
-                            &mut pts_frame_duration_us,
-                            &mut prev_input_pts,
-                        );
+                        track_frame_duration(&pkt, &mut pts_frame_duration_us, &mut prev_input_pts);
                         pending.push_back(pkt);
                     }
                     Ok(Cmd::Flush(done)) => {
@@ -479,7 +475,13 @@ fn handle_flush(
     info!("decode_loop: flush start, pending={}", pending.len());
 
     // Drain any currently available output first
-    let produced = drain_output(codec, frame_tx, pts_base, pts_frame_duration_us, output_count);
+    let produced = drain_output(
+        codec,
+        frame_tx,
+        pts_base,
+        pts_frame_duration_us,
+        output_count,
+    );
     *in_flight = in_flight.saturating_sub(produced as u32);
 
     for _ in 0..5000 {
@@ -489,7 +491,13 @@ fn handle_flush(
         if let Ok(submitted) = submit_pending(codec, pending, queue) {
             *in_flight = in_flight.saturating_add(submitted as u32);
         }
-        let produced = drain_output(codec, frame_tx, pts_base, pts_frame_duration_us, output_count);
+        let produced = drain_output(
+            codec,
+            frame_tx,
+            pts_base,
+            pts_frame_duration_us,
+            output_count,
+        );
         *in_flight = in_flight.saturating_sub(produced as u32);
         if !pending.is_empty() {
             thread::sleep(std::time::Duration::from_millis(1));
@@ -532,7 +540,7 @@ fn submit_pending(
     let mut count = 0usize;
     while let Some(pkt) = pending.pop_front() {
         if let Ok(buf) = codec.dequeue_input(0) {
-            let mut buf: mediacodec::CodecInputBuffer = buf;
+            let mut buf: anodecs::CodecInputBuffer = buf;
             let (ptr, cap): (*mut u8, usize) = buf.buffer();
             if pkt.payload.len() > cap {
                 return Err(Error::Platform(format!(

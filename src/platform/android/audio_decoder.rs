@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::thread;
 
-use mediacodec::{
+use anodecs::{
     CodecInputBuffer, CodecOutputBuffer, MediaCodec, MediaFormat, SampleFormat as McSampleFormat,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -148,7 +148,7 @@ fn drain_output(
             .unwrap_or(fallback_sample_rate);
         let ts = std::time::Duration::from_micros(out_buf.info().presentation_time_us as u64);
 
-        if let Some(mediacodec::Frame::Audio(audio)) = out_buf.frame() {
+        if let Some(anodecs::Frame::Audio(audio)) = out_buf.frame() {
             let audio_fmt = audio.format();
             let (fmt_out, samples) = match audio_fmt {
                 McSampleFormat::S16(buf) => {
@@ -206,7 +206,7 @@ fn audio_decode_loop(
                         let ts = std::time::Duration::from_micros(
                             out_buf.info().presentation_time_us as u64,
                         );
-                        if let Some(mediacodec::Frame::Audio(audio)) = out_buf.frame() {
+                        if let Some(anodecs::Frame::Audio(audio)) = out_buf.frame() {
                             let audio_fmt = audio.format();
                             let (fmt_out, samples) = match audio_fmt {
                                 McSampleFormat::S16(buf) => {

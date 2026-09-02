@@ -1,7 +1,7 @@
 use std::thread;
 use std::time::Duration;
 
-use mediacodec::{BufferFlag, CodecOutputBuffer, MediaCodec};
+use anodecs::{BufferFlag, CodecOutputBuffer, MediaCodec};
 use tokio::sync::oneshot;
 
 use crate::error::Error;
@@ -15,7 +15,7 @@ pub(super) enum Cmd<T> {
 pub(super) fn send_eos(codec: &mut MediaCodec) -> Result<(), Error> {
     for _ in 0..5000 {
         if let Ok(buf) = codec.dequeue_input(0) {
-            let mut buf: mediacodec::CodecInputBuffer = buf;
+            let mut buf: anodecs::CodecInputBuffer = buf;
             buf.set_flags(BufferFlag::EndOfStream as u32);
             buf.set_write_size(0);
             buf.set_time(0);

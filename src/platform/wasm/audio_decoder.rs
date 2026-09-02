@@ -1,4 +1,4 @@
-use web_codecs::{
+use wasodecs::{
     AudioDecoded, AudioDecoder, AudioDecoderConfig as WcAudioDecoderConfig, EncodedFrame,
 };
 
@@ -51,7 +51,7 @@ pub struct WasmAudioDecoderOutput {
 impl AudioDecoderOutput for WasmAudioDecoderOutput {
     async fn frame(&mut self) -> Result<Option<AudioFrame>, Error> {
         let opt = self.inner.next().await.map_err(|e| match e {
-            web_codecs::Error::Dropped => Error::Dropped,
+            wasodecs::Error::Dropped => Error::Dropped,
             other => Error::Platform(format!("{other:?}")),
         })?;
 
@@ -70,11 +70,7 @@ impl AudioDecoderOutput for WasmAudioDecoderOutput {
         for ch in 0..channels as usize {
             channel_buf.clear();
             wc_frame
-                .append_to(
-                    &mut channel_buf,
-                    ch,
-                    web_codecs::AudioCopyOptions::default(),
-                )
+                .append_to(&mut channel_buf, ch, wasodecs::AudioCopyOptions::default())
                 .map_err(|e| Error::Platform(format!("{e:?}")))?;
             for (i, s) in channel_buf.iter().enumerate() {
                 interleaved[i * channels as usize + ch] = *s;

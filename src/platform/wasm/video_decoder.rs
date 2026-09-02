@@ -1,4 +1,4 @@
-use web_codecs::{
+use wasodecs::{
     EncodedFrame, VideoDecoded, VideoDecoder, VideoDecoderConfig as WcVideoDecoderConfig,
 };
 
@@ -6,8 +6,8 @@ use crate::{
     error::Error,
     traits::{VideoDecoderInput, VideoDecoderOutput},
     types::{
-        video::HardwareBufferInner, Dimensions, EncodedVideoPacket, HardwareBuffer, PixelFormat,
-        VideoDecoderConfig, VideoFrame, VideoOutputMode, VideoPlanes,
+        Dimensions, EncodedVideoPacket, HardwareBuffer, PixelFormat, VideoDecoderConfig,
+        VideoFrame, VideoOutputMode, VideoPlanes, video::HardwareBufferInner,
     },
 };
 
@@ -15,8 +15,8 @@ pub(super) fn to_wc_config(cfg: &VideoDecoderConfig) -> WcVideoDecoderConfig {
     let mut wc = WcVideoDecoderConfig::new(cfg.codec.to_mime());
 
     if let Some(res) = cfg.resolution {
-        wc.resolution = Some(web_codecs::Dimensions::new(res.width, res.height));
-        wc.display = Some(web_codecs::Dimensions::new(res.width, res.height));
+        wc.resolution = Some(wasodecs::Dimensions::new(res.width, res.height));
+        wc.display = Some(wasodecs::Dimensions::new(res.width, res.height));
     }
 
     if let Some(desc) = &cfg.description {
@@ -41,7 +41,7 @@ fn to_our_pixel_format(fmt: web_sys::VideoPixelFormat) -> PixelFormat {
     }
 }
 
-fn to_our_frame_hw(f: web_codecs::VideoFrame) -> VideoFrame {
+fn to_our_frame_hw(f: wasodecs::VideoFrame) -> VideoFrame {
     let dims = f.dimensions();
     let ts = f.timestamp();
     let fmt = f
@@ -58,7 +58,7 @@ fn to_our_frame_hw(f: web_codecs::VideoFrame) -> VideoFrame {
     }
 }
 
-async fn to_our_frame_copied(f: web_codecs::VideoFrame) -> Result<VideoFrame, Error> {
+async fn to_our_frame_copied(f: wasodecs::VideoFrame) -> Result<VideoFrame, Error> {
     let dims = f.dimensions();
     let ts = f.timestamp();
     let fmt = f
@@ -113,7 +113,7 @@ pub struct WasmVideoDecoderOutput {
 impl VideoDecoderOutput for WasmVideoDecoderOutput {
     async fn frame(&mut self) -> Result<Option<VideoFrame>, Error> {
         let frame = self.inner.next().await.map_err(|e| match e {
-            web_codecs::Error::Dropped => Error::Dropped,
+            wasodecs::Error::Dropped => Error::Dropped,
             other => Error::Platform(format!("{other:?}")),
         })?;
         match frame {
@@ -128,11 +128,12 @@ impl VideoDecoderOutput for WasmVideoDecoderOutput {
     fn try_frame(&mut self) -> Result<Option<VideoFrame>, Error> {
         match self.output_mode {
             VideoOutputMode::Cpu => Err(Error::InvalidConfig(
-                "try_frame() with Cpu output is not supported on wasm; use frame() for async copy".into(),
+                "try_frame() with Cpu output is not supported on wasm; use frame() for async copy"
+                    .into(),
             )),
             _ => {
                 let frame = self.inner.try_recv().map_err(|e| match e {
-                    web_codecs::Error::Dropped => Error::Dropped,
+                    wasodecs::Error::Dropped => Error::Dropped,
                     other => Error::Platform(format!("{other:?}")),
                 })?;
                 Ok(frame.map(to_our_frame_hw))
@@ -142,12 +143,12 @@ impl VideoDecoderOutput for WasmVideoDecoderOutput {
 }
 
 impl WasmVideoDecoderOutput {
-    /// Returns the raw `web_codecs::VideoFrame` without converting to [`VideoPlanes::Hardware`].
+    /// Returns the raw `wasodecs::VideoFrame` without converting to [`VideoPlanes::Hardware`].
     /// The caller can copy the pixel data to CPU memory later via
-    /// [`web_codecs::VideoFrame::copy_to_cpu`].
-    pub fn try_frame_raw(&mut self) -> Result<Option<web_codecs::VideoFrame>, Error> {
+    /// [`wasodecs::VideoFrame::copy_to_cpu`].
+    pub fn try_frame_raw(&mut self) -> Result<Option<wasodecs::VideoFrame>, Error> {
         self.inner.try_recv().map_err(|e| match e {
-            web_codecs::Error::Dropped => Error::Dropped,
+            wasodecs::Error::Dropped => Error::Dropped,
             other => Error::Platform(format!("{other:?}")),
         })
     }
@@ -173,7 +174,10 @@ pub fn create(
                 Ok((dec, decoded)) => {
                     return Ok((
                         WasmVideoDecoderInput { inner: dec },
-                        WasmVideoDecoderOutput { inner: decoded, output_mode },
+                        WasmVideoDecoderOutput {
+                            inner: decoded,
+                            output_mode,
+                        },
                     ));
                 }
                 Err(e) => last_err = Some(e),

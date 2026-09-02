@@ -10,13 +10,13 @@ use crate::{
     error::Error,
     traits::{VideoDecoderInput, VideoDecoderOutput},
     types::{
-        video::HardwareBufferInner, Dimensions, DmaBufFrame, DmaBufPlane, EncodedVideoPacket,
-        HardwareBuffer, PixelFormat, Timestamp, VideoDecoderConfig, VideoFrame, VideoOutputMode,
-        VideoPlanes,
+        Dimensions, DmaBufFrame, DmaBufPlane, EncodedVideoPacket, HardwareBuffer, PixelFormat,
+        Timestamp, VideoDecoderConfig, VideoFrame, VideoOutputMode, VideoPlanes,
+        video::HardwareBufferInner,
     },
 };
 
-use cros_codecs::{
+use nuxodecs::{
     BlockingMode, DecodedFormat, EncodedFormat, Fourcc, FrameLayout, PlaneLayout, Resolution,
     decoder::stateless::{
         DecodeError, DynStatelessVideoDecoder, StatelessDecoder, StatelessVideoDecoder,
@@ -230,7 +230,7 @@ fn worker_loop(
         width: 0,
         height: 0,
     };
-    let mut cached_format = cros_codecs::DecodedFormat::NV12;
+    let mut cached_format = nuxodecs::DecodedFormat::NV12;
 
     let va_display_clone = va_display.clone();
     let mut alloc_frame = move |stream_info: &StreamInfo| -> Result<GenericDmaVideoFrame, Error> {
@@ -355,7 +355,7 @@ fn drain_events<F: CcVideoFrame + 'static>(
     cached_w: &mut u32,
     cached_h: &mut u32,
     cached_display: &mut Resolution,
-    cached_format: &mut cros_codecs::DecodedFormat,
+    cached_format: &mut nuxodecs::DecodedFormat,
     output_mode: VideoOutputMode,
 ) -> Result<usize, Error> {
     let mut count = 0;
@@ -387,15 +387,15 @@ fn drain_events<F: CcVideoFrame + 'static>(
                         match gdma_to_hardware(&*frame_arc, ts, *cached_format) {
                             Ok(f) => f,
                             Err(e) if matches!(output_mode, VideoOutputMode::PreferHardware) => {
-                                eprintln!("[VAAPI] gdma_to_hardware failed: {e:?}, falling back to CPU");
+                                eprintln!(
+                                    "[VAAPI] gdma_to_hardware failed: {e:?}, falling back to CPU"
+                                );
                                 cpu_path(&*frame_arc, ts, *cached_format, va_display)?
                             }
                             Err(e) => return Err(e),
                         }
                     }
-                    VideoOutputMode::Cpu => {
-                        cpu_path(&*frame_arc, ts, *cached_format, va_display)?
-                    }
+                    VideoOutputMode::Cpu => cpu_path(&*frame_arc, ts, *cached_format, va_display)?,
                 };
                 frame_tx.send(Ok(out)).map_err(|_| Error::Dropped)?;
                 count += 1;
@@ -418,7 +418,7 @@ fn drain_events<F: CcVideoFrame + 'static>(
 fn cpu_path<F: CcVideoFrame + 'static>(
     frame: &F,
     ts: Timestamp,
-    fmt: cros_codecs::DecodedFormat,
+    fmt: nuxodecs::DecodedFormat,
     va_display: &Arc<libva::Display>,
 ) -> Result<VideoFrame, Error> {
     match fmt {
@@ -441,9 +441,7 @@ fn gdma_to_hardware<F: CcVideoFrame + 'static>(
         .downcast_ref::<GenericDmaVideoFrame>()
         .ok_or_else(|| Error::Platform("not GenericDmaVideoFrame".into()))?;
 
-    let (fds, layout) = gdma
-        .export_dmabuf()
-        .map_err(|e| Error::Platform(e))?;
+    let (fds, layout) = gdma.export_dmabuf().map_err(|e| Error::Platform(e))?;
 
     let pixel = match decoded_fmt {
         DecodedFormat::NV12 | DecodedFormat::MM21 => PixelFormat::Nv12,
@@ -508,8 +506,7 @@ pub(crate) fn dmabuf_copy_to_cpu(
         .iter()
         .map(|f| f.try_clone().map_err(|e| Error::Platform(e.to_string())))
         .collect::<Result<_, _>>()?;
-    let gf = GenericDmaVideoFrame::new(fds, layout)
-        .map_err(|e| Error::Platform(e))?;
+    let gf = GenericDmaVideoFrame::new(fds, layout).map_err(|e| Error::Platform(e))?;
     let v = nv12_frame_to_nv12_packed(&gf)?;
     Ok((PixelFormat::Nv12, v))
 }
@@ -537,8 +534,8 @@ fn nv12_frame_to_nv12_packed<F: CcVideoFrame>(frame: &F) -> Result<Vec<u8>, Erro
     Ok(out)
 }
 
-fn rt_format_from_format(format: cros_codecs::DecodedFormat) -> u32 {
-    use cros_codecs::DecodedFormat;
+fn rt_format_from_format(format: nuxodecs::DecodedFormat) -> u32 {
+    use nuxodecs::DecodedFormat;
     match format {
         DecodedFormat::NV12 | DecodedFormat::I420 => libva::VA_RT_FORMAT_YUV420,
         DecodedFormat::I422 => libva::VA_RT_FORMAT_YUV422,
@@ -557,7 +554,7 @@ fn rt_format_from_format(format: cros_codecs::DecodedFormat) -> u32 {
 fn create_video_frame(
     w: u32,
     h: u32,
-    format: cros_codecs::DecodedFormat,
+    format: nuxodecs::DecodedFormat,
     display_resolution: Resolution,
     va_display: &Arc<libva::Display>,
 ) -> Result<GenericDmaVideoFrame, Error> {

@@ -22,7 +22,7 @@ use crate::{
     },
 };
 
-use cros_codecs::{
+use nuxodecs::{
     BlockingMode, Fourcc, FrameLayout, PlaneLayout, Resolution,
     backend::vaapi::surface_pool::VaSurfacePool,
     decoder::FramePool,
@@ -33,7 +33,7 @@ use cros_codecs::{
 
 use va::{Display, Image, Surface, UsageHint, VA_RT_FORMAT_YUV420, VAImageFormat};
 
-type PooledSurface = cros_codecs::backend::vaapi::surface_pool::PooledVaSurface<()>;
+type PooledSurface = nuxodecs::backend::vaapi::surface_pool::PooledVaSurface<()>;
 
 struct EncoderInit {
     display: Arc<Display>,
@@ -408,7 +408,7 @@ fn create_vaapi_encoder(
     fourcc: Fourcc,
     coded_size: Resolution,
 ) -> Result<
-    Box<dyn CcVideoEncoder<cros_codecs::backend::vaapi::surface_pool::PooledVaSurface<()>>>,
+    Box<dyn CcVideoEncoder<nuxodecs::backend::vaapi::surface_pool::PooledVaSurface<()>>>,
     Error,
 > {
     let bitrate = config.bitrate.unwrap_or(1_200_000) as u64;
@@ -418,8 +418,8 @@ fn create_vaapi_encoder(
 
     match &config.codec {
         VideoCodecId::H264 { .. } => {
-            use cros_codecs::codec::h264::parser::{Level, Profile};
-            use cros_codecs::encoder::{PredictionStructure, RateControl, Tunings};
+            use nuxodecs::codec::h264::parser::{Level, Profile};
+            use nuxodecs::encoder::{PredictionStructure, RateControl, Tunings};
 
             let level = config
                 .level
@@ -437,7 +437,7 @@ fn create_vaapi_encoder(
 
             let idr_period = framerate.max(1) as u16;
 
-            let cfg = cros_codecs::encoder::h264::EncoderConfig {
+            let cfg = nuxodecs::encoder::h264::EncoderConfig {
                 resolution: coded_size,
                 profile: Profile::Main,
                 level,
@@ -453,7 +453,7 @@ fn create_vaapi_encoder(
                 },
             };
 
-            let enc = cros_codecs::encoder::stateless::h264::StatelessEncoder::new_native_vaapi(
+            let enc = nuxodecs::encoder::stateless::h264::StatelessEncoder::new_native_vaapi(
                 Arc::clone(display),
                 cfg,
                 fourcc,
@@ -656,7 +656,7 @@ fn h265_is_idr(data: &[u8]) -> Option<bool> {
 }
 
 fn vp9_is_keyframe(data: &[u8]) -> Option<bool> {
-    use cros_codecs::codec::vp9::parser::{FrameType, Parser};
+    use nuxodecs::codec::vp9::parser::{FrameType, Parser};
     let mut parser = Parser::default();
     match parser.parse_frame(data, 0, data.len()) {
         Ok(frame) => Some(frame.header.frame_type == FrameType::KeyFrame),
@@ -665,7 +665,7 @@ fn vp9_is_keyframe(data: &[u8]) -> Option<bool> {
 }
 
 fn av1_is_keyframe(data: &[u8]) -> Option<bool> {
-    use cros_codecs::codec::av1::parser::{FrameType, ObuType, Parser};
+    use nuxodecs::codec::av1::parser::{FrameType, ObuType, Parser};
     let mut parser = Parser::default();
     loop {
         let action = match parser.read_obu(data) {
@@ -673,7 +673,7 @@ fn av1_is_keyframe(data: &[u8]) -> Option<bool> {
             Err(_) => return None,
         };
         match action {
-            cros_codecs::codec::av1::parser::ObuAction::Process(obu) => {
+            nuxodecs::codec::av1::parser::ObuAction::Process(obu) => {
                 match obu.header.obu_type {
                     ObuType::FrameHeader | ObuType::Frame | ObuType::RedundantFrameHeader => {
                         match parser.parse_frame_header_obu(&obu) {
@@ -690,7 +690,7 @@ fn av1_is_keyframe(data: &[u8]) -> Option<bool> {
                     _ => {} // Reserved, Padding etc
                 }
             }
-            cros_codecs::codec::av1::parser::ObuAction::Drop(_consumed) => {
+            nuxodecs::codec::av1::parser::ObuAction::Drop(_consumed) => {
                 // OBU was dropped by parser (e.g. not in operating point) — continue
             }
         }

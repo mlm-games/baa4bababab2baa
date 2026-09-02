@@ -1,5 +1,5 @@
 use js_sys;
-use web_codecs::{
+use wasodecs::{
     Dimensions as WcDimensions, EncodedFrame, VideoEncodeOptions, VideoEncoded, VideoEncoder,
     VideoEncoderConfig as WcVideoEncoderConfig,
 };
@@ -41,8 +41,8 @@ pub(super) fn to_wc_config(cfg: &VideoEncoderConfig) -> WcVideoEncoderConfig {
     }
     if let Some(fmt) = cfg.avc_bitstream_format {
         wc.avc_bitstream_format = Some(match fmt {
-            AvcBitstreamFormat::AnnexB => web_codecs::AvcBitstreamFormat::AnnexB,
-            AvcBitstreamFormat::Avc => web_codecs::AvcBitstreamFormat::Avc,
+            AvcBitstreamFormat::AnnexB => wasodecs::AvcBitstreamFormat::AnnexB,
+            AvcBitstreamFormat::Avc => wasodecs::AvcBitstreamFormat::Avc,
         });
     }
 
@@ -56,7 +56,7 @@ pub struct WasmVideoEncoderInput {
 
 impl VideoEncoderInput for WasmVideoEncoderInput {
     fn encode(&mut self, frame: VideoFrame, keyframe: Option<bool>) -> Result<(), Error> {
-        let wc_frame: web_codecs::VideoFrame = match frame.planes {
+        let wc_frame: wasodecs::VideoFrame = match frame.planes {
             VideoPlanes::Hardware(_) => {
                 return Err(Error::InvalidConfig(
                     "Cannot re-encode a hardware VideoFrame on WASM".into(),
@@ -103,7 +103,7 @@ fn build_wasm_frame(
     dims: &Dimensions,
     format: PixelFormat,
     timestamp: crate::types::Timestamp,
-) -> Result<web_codecs::VideoFrame, Error> {
+) -> Result<wasodecs::VideoFrame, Error> {
     use js_sys::Uint8Array;
     use web_sys::{VideoFrame, VideoFrameBufferInit, VideoPixelFormat};
 
@@ -126,7 +126,7 @@ fn build_wasm_frame(
     );
 
     VideoFrame::new_with_u8_array_and_video_frame_buffer_init(&array, &init)
-        .map(web_codecs::VideoFrame::from)
+        .map(wasodecs::VideoFrame::from)
         .map_err(|e| Error::Platform(format!("{e:?}")))
 }
 
@@ -158,7 +158,7 @@ impl WasmVideoEncoderOutput {
     /// Check if the encoder's error callback has fired.
     pub fn check_error(&self) -> Option<Error> {
         self.inner.check_error().map(|e| match e {
-            web_codecs::Error::Dropped => Error::Dropped,
+            wasodecs::Error::Dropped => Error::Dropped,
             other => Error::Platform(format!("{other:?}")),
         })
     }
@@ -169,7 +169,7 @@ impl WasmVideoEncoderOutput {
             Ok(Some(frame)) => Ok(Some(self.build_packet(frame))),
             Ok(None) => Ok(None),
             Err(e) => Err(match e {
-                web_codecs::Error::Dropped => Error::Dropped,
+                wasodecs::Error::Dropped => Error::Dropped,
                 other => Error::Platform(format!("{other:?}")),
             }),
         }
@@ -179,7 +179,7 @@ impl WasmVideoEncoderOutput {
 impl VideoEncoderOutput for WasmVideoEncoderOutput {
     async fn packet(&mut self) -> Result<Option<EncodedVideoPacket>, Error> {
         let pkt = self.inner.next().await.map_err(|e| match e {
-            web_codecs::Error::Dropped => Error::Dropped,
+            wasodecs::Error::Dropped => Error::Dropped,
             other => Error::Platform(format!("{other:?}")),
         })?;
 

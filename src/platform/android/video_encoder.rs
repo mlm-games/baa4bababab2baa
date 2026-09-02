@@ -6,8 +6,8 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
+use anodecs::{BufferFlag, MediaCodec, MediaFormat};
 use log::info;
-use mediacodec::{BufferFlag, MediaCodec, MediaFormat};
 use tokio::sync::{mpsc, oneshot};
 
 use super::cmd::{self, Cmd};
@@ -258,7 +258,7 @@ fn drain_pending_frames(
     let mut submitted = false;
     while let Some((frame, keyframe)) = pending.pop_front() {
         if let Ok(buf) = codec.dequeue_input(0) {
-            let mut buf: mediacodec::CodecInputBuffer = buf;
+            let mut buf: anodecs::CodecInputBuffer = buf;
             let (ptr, cap): (*mut u8, usize) = buf.buffer();
             let data = match &frame.planes {
                 VideoPlanes::Cpu(d) => d,
@@ -295,7 +295,7 @@ fn drain_pending_frames(
 
 fn send_encoded_packet(
     pkt_tx: &mpsc::UnboundedSender<Result<EncodedVideoPacket, Error>>,
-    info: &mediacodec::BufferInfo,
+    info: &anodecs::BufferInfo,
     payload: &[u8],
     codec_config_pending: &mut Option<Vec<u8>>,
     first_packet_sent: &mut bool,
@@ -369,12 +369,12 @@ fn drain_encoded_output(
     codec_config_pending: &mut Option<Vec<u8>>,
     first_packet_sent: &mut bool,
 ) -> Result<bool, Error> {
-    use mediacodec::DequeueOutputError;
+    use anodecs::DequeueOutputError;
     let mut had_output = false;
     loop {
         match codec.dequeue_output(0) {
             Ok(out) => {
-                let out_buf: mediacodec::CodecOutputBuffer = out;
+                let out_buf: anodecs::CodecOutputBuffer = out;
                 let info = out_buf.info();
                 let flags = info.flags;
 

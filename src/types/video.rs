@@ -56,16 +56,27 @@ impl VideoCodecId {
     pub fn to_webcodecs_strings(&self) -> Vec<&str> {
         match self {
             VideoCodecId::H264 { .. } => vec![
-                "avc1.42001E", "avc1.42E01E", "avc1.4D001E", "avc1.4D401E",
-                "avc1.64001E", "avc1.640028", "avc1.640032",
+                "avc1.42001E",
+                "avc1.42E01E",
+                "avc1.4D001E",
+                "avc1.4D401E",
+                "avc1.64001E",
+                "avc1.640028",
+                "avc1.640032",
             ],
             VideoCodecId::Hevc => vec![
-                "hvc1.1.6.L93.B0",   "hev1.1.6.L93.B0",
-                "hvc1.1.6.L120.B0",  "hev1.1.6.L120.B0",
-                "hvc1.1.6.L123.B0",  "hev1.1.6.L123.B0",
-                "hvc1.1.6.L150.B0",  "hev1.1.6.L150.B0",
-                "hvc1.1.6.L153.B0",  "hev1.1.6.L153.B0",
-                "hvc1.2.4.L120.B0",  "hev1.2.4.L120.B0",
+                "hvc1.1.6.L93.B0",
+                "hev1.1.6.L93.B0",
+                "hvc1.1.6.L120.B0",
+                "hev1.1.6.L120.B0",
+                "hvc1.1.6.L123.B0",
+                "hev1.1.6.L123.B0",
+                "hvc1.1.6.L150.B0",
+                "hev1.1.6.L150.B0",
+                "hvc1.1.6.L153.B0",
+                "hev1.1.6.L153.B0",
+                "hvc1.2.4.L120.B0",
+                "hev1.2.4.L120.B0",
             ],
             VideoCodecId::Av1 => vec!["av01.0.04M.08"],
             VideoCodecId::Vp9 => vec!["vp09.00.10.08"],
@@ -203,7 +214,8 @@ impl VideoFrame {
 
     pub fn ensure_cpu(&mut self) -> Result<(), crate::Error> {
         if let VideoPlanes::Hardware(hw) = &self.planes {
-            let (fmt, data) = hw.copy_to_cpu(self.format, self.dimensions.width, self.dimensions.height)?;
+            let (fmt, data) =
+                hw.copy_to_cpu(self.format, self.dimensions.width, self.dimensions.height)?;
             self.format = fmt;
             self.planes = VideoPlanes::Cpu(data);
         }
@@ -230,9 +242,7 @@ impl fmt::Debug for HardwareBuffer {
             #[cfg(target_arch = "wasm32")]
             HardwareBufferInner::WebCodecs(_) => f.write_str("WebCodecs(VideoFrame)"),
             #[cfg(target_os = "android")]
-            HardwareBufferInner::MediaCodecSurface { .. } => {
-                f.write_str("MediaCodecSurface")
-            }
+            HardwareBufferInner::MediaCodecSurface { .. } => f.write_str("MediaCodecSurface"),
             HardwareBufferInner::Unsupported => f.write_str("Unsupported"),
         }
     }
@@ -242,7 +252,7 @@ pub(crate) enum HardwareBufferInner {
     #[cfg(all(target_os = "linux", feature = "linux"))]
     DmaBuf(DmaBufFrame),
     #[cfg(target_arch = "wasm32")]
-    WebCodecs(web_codecs::VideoFrame),
+    WebCodecs(wasodecs::VideoFrame),
     #[cfg(target_os = "android")]
     MediaCodecSurface {
         release: Option<Box<dyn FnOnce(bool) + Send>>,
@@ -280,7 +290,7 @@ impl HardwareBuffer {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub fn as_web_video_frame(&self) -> Option<&web_codecs::VideoFrame> {
+    pub fn as_web_video_frame(&self) -> Option<&wasodecs::VideoFrame> {
         match &self.inner {
             HardwareBufferInner::WebCodecs(f) => Some(f),
             _ => None,
@@ -288,14 +298,19 @@ impl HardwareBuffer {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub fn into_web_video_frame(mut self) -> Option<web_codecs::VideoFrame> {
+    pub fn into_web_video_frame(mut self) -> Option<wasodecs::VideoFrame> {
         match std::mem::replace(&mut self.inner, HardwareBufferInner::Unsupported) {
             HardwareBufferInner::WebCodecs(f) => Some(f),
             _ => None,
         }
     }
 
-    pub fn copy_to_cpu(&self, fmt: PixelFormat, w: u32, h: u32) -> Result<(PixelFormat, Vec<u8>), crate::Error> {
+    pub fn copy_to_cpu(
+        &self,
+        fmt: PixelFormat,
+        w: u32,
+        h: u32,
+    ) -> Result<(PixelFormat, Vec<u8>), crate::Error> {
         match &self.inner {
             #[cfg(all(target_os = "linux", feature = "linux"))]
             HardwareBufferInner::DmaBuf(_) => {
