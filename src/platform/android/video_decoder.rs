@@ -1,4 +1,5 @@
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use anodecs::{BufferFlag, DequeueOutputError, MediaCodec, MediaFormat};
@@ -28,6 +29,12 @@ impl Drop for AndroidVideoDecoderInput {
 
 pub struct AndroidVideoDecoderOutput {
     rx: mpsc::UnboundedReceiver<Result<VideoFrame, Error>>,
+    /// Set when the decode thread exits via a clean teardown path (`Close` /
+    /// sender dropped). A `Disconnected` channel *without* this flag means the
+    /// thread died unexpectedly (panic), which must surface as an error so
+    /// callers can fall back to software instead of stalling forever on
+    /// `Ok(None)`.
+    clean_exit: Arc<AtomicBool>,
 }
 
 impl VideoDecoderInput for AndroidVideoDecoderInput {
@@ -58,7 +65,9 @@ impl VideoDecoderOutput for AndroidVideoDecoderOutput {
     async fn frame(&mut self) -> Result<Option<VideoFrame>, Error> {
         match self.rx.recv().await {
             Some(result) => result.map(Some),
-            None => Ok(None),
+            // Clean shutdown reads as EOS; an unclean one is decoder death.
+            None if self.clean_exit.load(Ordering::Acquire) => Ok(None),
+            None => Err(Error::Dropped),
         }
     }
 
@@ -67,7 +76,13 @@ impl VideoDecoderOutput for AndroidVideoDecoderOutput {
             Ok(Ok(frame)) => Ok(Some(frame)),
             Ok(Err(e)) => Err(e),
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::error::TryRecvError::Disconnected) => Ok(None),
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                if self.clean_exit.load(Ordering::Acquire) {
+                    Ok(None)
+                } else {
+                    Err(Error::Dropped)
+                }
+            }
         }
     }
 }
@@ -129,14 +144,19 @@ pub fn create(
     let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Result<VideoFrame, Error>>();
     let queue = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let queue2 = queue.clone();
+    let clean_exit = Arc::new(AtomicBool::new(false));
+    let clean_exit2 = clean_exit.clone();
 
     thread::spawn(move || {
-        decode_loop(codec, cmd_rx, frame_tx, queue2);
+        decode_loop(codec, cmd_rx, frame_tx, queue2, clean_exit2);
     });
 
     Ok((
         AndroidVideoDecoderInput { tx: cmd_tx, queue },
-        AndroidVideoDecoderOutput { rx: frame_rx },
+        AndroidVideoDecoderOutput {
+            rx: frame_rx,
+            clean_exit,
+        },
     ))
 }
 
@@ -318,6 +338,7 @@ fn decode_loop(
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd<EncodedVideoPacket>>,
     frame_tx: mpsc::UnboundedSender<Result<VideoFrame, Error>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    clean_exit: Arc<AtomicBool>,
 ) {
     let mut pending: std::collections::VecDeque<EncodedVideoPacket> =
         std::collections::VecDeque::new();
@@ -342,6 +363,7 @@ fn decode_loop(
                     info!("decode_loop: close");
                     drain_output(&mut codec, &frame_tx);
                     queue.store(0, Ordering::Relaxed);
+                    clean_exit.store(true, Ordering::Release);
                     return;
                 }
             }
@@ -366,6 +388,7 @@ fn decode_loop(
                         info!("decode_loop: close (non-blocking)");
                         drain_output(&mut codec, &frame_tx);
                         queue.store(0, Ordering::Relaxed);
+                        clean_exit.store(true, Ordering::Release);
                         return;
                     }
                     Err(mpsc::error::TryRecvError::Empty) => break,
@@ -390,6 +413,7 @@ fn decode_loop(
             info!("decode_loop: closed+empty");
             drain_output(&mut codec, &frame_tx);
             queue.store(0, Ordering::Relaxed);
+            clean_exit.store(true, Ordering::Release);
             return;
         }
     }

@@ -4,7 +4,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread,
     time::Duration,
@@ -160,6 +160,12 @@ impl Drop for AppleVideoDecoderInput {
 
 pub struct AppleVideoDecoderOutput {
     rx: mpsc::UnboundedReceiver<Result<VideoFrame, Error>>,
+    /// Set when the decode thread exits via a clean teardown path (`Close` /
+    /// sender dropped). A `Disconnected` channel *without* this flag means the
+    /// thread died unexpectedly (panic), which must surface as an error so
+    /// callers can fall back to software instead of stalling forever on
+    /// `Ok(None)`.
+    clean_exit: Arc<AtomicBool>,
 }
 
 impl VideoDecoderInput for AppleVideoDecoderInput {
@@ -188,7 +194,9 @@ impl VideoDecoderOutput for AppleVideoDecoderOutput {
     async fn frame(&mut self) -> Result<Option<VideoFrame>, Error> {
         match self.rx.recv().await {
             Some(r) => r.map(Some),
-            None => Ok(None),
+            // Clean shutdown reads as EOS; an unclean one is decoder death.
+            None if self.clean_exit.load(Ordering::Acquire) => Ok(None),
+            None => Err(Error::Dropped),
         }
     }
 
@@ -197,7 +205,13 @@ impl VideoDecoderOutput for AppleVideoDecoderOutput {
             Ok(Ok(frame)) => Ok(Some(frame)),
             Ok(Err(e)) => Err(e),
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::error::TryRecvError::Disconnected) => Ok(None),
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                if self.clean_exit.load(Ordering::Acquire) {
+                    Ok(None)
+                } else {
+                    Err(Error::Dropped)
+                }
+            }
         }
     }
 }
@@ -224,14 +238,26 @@ pub fn create_decoder(
     let queue = Arc::new(AtomicU32::new(0));
     let queue2 = queue.clone();
     let expected = config.resolution;
+    let clean_exit = Arc::new(AtomicBool::new(false));
+    let clean_exit2 = clean_exit.clone();
 
     thread::spawn(move || {
-        decode_loop(&mut *decoder, cmd_rx, frame_tx, queue2, expected);
+        decode_loop(
+            &mut *decoder,
+            cmd_rx,
+            frame_tx,
+            queue2,
+            expected,
+            clean_exit2,
+        );
     });
 
     Ok((
         AppleVideoDecoderInput { tx: cmd_tx, queue },
-        AppleVideoDecoderOutput { rx: frame_rx },
+        AppleVideoDecoderOutput {
+            rx: frame_rx,
+            clean_exit,
+        },
     ))
 }
 
@@ -345,6 +371,7 @@ fn decode_loop(
     frame_tx: mpsc::UnboundedSender<Result<VideoFrame, Error>>,
     queue: Arc<AtomicU32>,
     expected: Option<Dimensions>,
+    clean_exit: Arc<AtomicBool>,
 ) {
     let mut pending_pts: VecDeque<i64> = VecDeque::new();
     let mut last_pts_us: i64 = 0;
@@ -374,6 +401,7 @@ fn decode_loop(
 
                 if cmd_rx.is_closed() {
                     queue.store(0, Ordering::Relaxed);
+                    clean_exit.store(true, Ordering::Release);
                     return;
                 }
             }
@@ -394,6 +422,7 @@ fn decode_loop(
             }
             Some(DecCmd::Close) | None => {
                 queue.store(0, Ordering::Relaxed);
+                clean_exit.store(true, Ordering::Release);
                 return;
             }
         }

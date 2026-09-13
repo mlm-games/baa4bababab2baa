@@ -1,6 +1,6 @@
 use std::{
     sync::Arc,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
     thread,
 };
 
@@ -45,6 +45,12 @@ pub struct CrosVideoDecoderInput {
 
 pub struct CrosVideoDecoderOutput {
     rx: mpsc::UnboundedReceiver<Result<VideoFrame, Error>>,
+    /// Set when the worker thread exits via a clean teardown path (`Close` /
+    /// sender dropped). A `Disconnected` channel *without* this flag means the
+    /// thread died unexpectedly (panic), which must surface as an error so
+    /// callers can fall back to software instead of stalling forever on
+    /// `Ok(None)`.
+    clean_exit: Arc<AtomicBool>,
 }
 
 impl Drop for CrosVideoDecoderInput {
@@ -79,7 +85,9 @@ impl VideoDecoderOutput for CrosVideoDecoderOutput {
     async fn frame(&mut self) -> Result<Option<VideoFrame>, Error> {
         match self.rx.recv().await {
             Some(r) => r.map(Some),
-            None => Ok(None),
+            // Clean shutdown reads as EOS; an unclean one is decoder death.
+            None if self.clean_exit.load(Ordering::Acquire) => Ok(None),
+            None => Err(Error::Dropped),
         }
     }
 
@@ -88,7 +96,13 @@ impl VideoDecoderOutput for CrosVideoDecoderOutput {
             Ok(Ok(frame)) => Ok(Some(frame)),
             Ok(Err(e)) => Err(e),
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::error::TryRecvError::Disconnected) => Ok(None),
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                if self.clean_exit.load(Ordering::Acquire) {
+                    Ok(None)
+                } else {
+                    Err(Error::Dropped)
+                }
+            }
         }
     }
 }
@@ -113,11 +127,26 @@ pub fn create(
     let queue = Arc::new(AtomicU32::new(0));
 
     let queue2 = queue.clone();
-    thread::spawn(move || worker_loop(cmd_rx, frame_tx, queue2, codec, va_display, output_mode));
+    let clean_exit = Arc::new(AtomicBool::new(false));
+    let clean_exit2 = clean_exit.clone();
+    thread::spawn(move || {
+        worker_loop(
+            cmd_rx,
+            frame_tx,
+            queue2,
+            codec,
+            va_display,
+            output_mode,
+            clean_exit2,
+        )
+    });
 
     Ok((
         CrosVideoDecoderInput { tx: cmd_tx, queue },
-        CrosVideoDecoderOutput { rx: frame_rx },
+        CrosVideoDecoderOutput {
+            rx: frame_rx,
+            clean_exit,
+        },
     ))
 }
 
@@ -236,6 +265,7 @@ fn worker_loop(
     codec: crate::types::VideoCodecId,
     va_display: Arc<libva::Display>,
     output_mode: VideoOutputMode,
+    clean_exit: Arc<AtomicBool>,
 ) {
     let mut frame_queue: Vec<GenericDmaVideoFrame> = Vec::new();
     let mut decoder: Option<DynStatelessVideoDecoder<GenericDmaVideoFrame>> = None;
@@ -262,12 +292,14 @@ fn worker_loop(
     loop {
         let Some(cmd) = cmd_rx.blocking_recv() else {
             queue.store(0, Ordering::Relaxed);
+            clean_exit.store(true, Ordering::Release);
             return;
         };
 
         match cmd {
             Cmd::Close => {
                 queue.store(0, Ordering::Relaxed);
+                clean_exit.store(true, Ordering::Release);
                 return;
             }
 
