@@ -56,9 +56,12 @@ impl Drop for CrosVideoDecoderInput {
 impl VideoDecoderInput for CrosVideoDecoderInput {
     fn decode(&mut self, packet: EncodedVideoPacket) -> Result<(), Error> {
         self.queue.fetch_add(1, Ordering::Relaxed);
-        self.tx
-            .send(Cmd::Packet(packet))
-            .map_err(|_| Error::Dropped)
+        if let Err(e) = self.tx.send(Cmd::Packet(packet)) {
+            self.queue.fetch_sub(1, Ordering::Relaxed);
+            let _ = e;
+            return Err(Error::Dropped);
+        }
+        Ok(())
     }
 
     async fn flush(&mut self) -> Result<(), Error> {
@@ -148,14 +151,27 @@ fn check_codec_supported(
             }
         }
         _ => {
-            let profile = match fmt {
-                EncodedFormat::H264 => VAProfile::VAProfileH264Main,
-                EncodedFormat::VP8 => VAProfile::VAProfileVP8Version0_3,
-                EncodedFormat::VP9 => VAProfile::VAProfileVP9Profile0,
-                EncodedFormat::AV1 => VAProfile::VAProfileAV1Profile0,
+            let accepted: &[libva::VAProfile::Type] = match fmt {
+                EncodedFormat::H264 => &[
+                    VAProfile::VAProfileH264Baseline,
+                    VAProfile::VAProfileH264ConstrainedBaseline,
+                    VAProfile::VAProfileH264Main,
+                    VAProfile::VAProfileH264High,
+                ],
+                EncodedFormat::VP8 => &[VAProfile::VAProfileVP8Version0_3],
+                EncodedFormat::VP9 => &[
+                    VAProfile::VAProfileVP9Profile0,
+                    VAProfile::VAProfileVP9Profile1,
+                    VAProfile::VAProfileVP9Profile2,
+                    VAProfile::VAProfileVP9Profile3,
+                ],
+                EncodedFormat::AV1 => &[
+                    VAProfile::VAProfileAV1Profile0,
+                    VAProfile::VAProfileAV1Profile1,
+                ],
                 _ => return Err(format!("{fmt:?} not supported by VA driver")),
             };
-            if !profiles.contains(&profile) {
+            if !profiles.iter().any(|p| accepted.contains(p)) {
                 return Err(format!("{fmt:?} not supported by VA driver"));
             }
         }
@@ -480,11 +496,22 @@ fn gdma_to_hardware<F: CcVideoFrame + 'static>(
 
 pub(crate) fn dmabuf_copy_to_cpu(
     hw: &HardwareBuffer,
-    _fmt: PixelFormat,
-    _w: u32,
-    _h: u32,
+    fmt: PixelFormat,
+    w: u32,
+    h: u32,
 ) -> Result<(PixelFormat, Vec<u8>), Error> {
     let d = hw.as_dmabuf().ok_or(Error::Unsupported)?;
+    if w != 0 && h != 0 && (d.width != w || d.height != h) {
+        return Err(Error::InvalidConfig(format!(
+            "dmabuf {}x{} does not match frame {}x{}",
+            d.width, d.height, w, h
+        )));
+    }
+    if !matches!(fmt, PixelFormat::Nv12 | PixelFormat::Yuv420p) {
+        return Err(Error::InvalidConfig(format!(
+            "dmabuf readback only supports NV12/YUV420p, got {fmt:?}"
+        )));
+    }
     let layout = FrameLayout {
         format: (Fourcc::from(d.fourcc), d.modifier),
         size: Resolution {

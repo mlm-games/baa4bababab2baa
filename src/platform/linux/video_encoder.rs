@@ -69,9 +69,12 @@ impl Drop for CrosVideoEncoderInput {
 impl VideoEncoderInput for CrosVideoEncoderInput {
     fn encode(&mut self, frame: VideoFrame, keyframe: Option<bool>) -> Result<(), Error> {
         self.queue.fetch_add(1, Ordering::Relaxed);
-        self.tx
-            .send(Cmd::Encode(frame, keyframe))
-            .map_err(|_| Error::Dropped)
+        if let Err(e) = self.tx.send(Cmd::Encode(frame, keyframe)) {
+            self.queue.fetch_sub(1, Ordering::Relaxed);
+            let _ = e;
+            return Err(Error::Dropped);
+        }
+        Ok(())
     }
 
     async fn flush(&mut self) -> Result<(), Error> {
@@ -173,10 +176,7 @@ fn init_encoder_inner(config: &VideoEncoderConfig) -> Result<EncoderInit, Error>
 pub fn create(
     config: VideoEncoderConfig,
 ) -> Result<(CrosVideoEncoderInput, CrosVideoEncoderOutput), Error> {
-    if !matches!(
-        config.codec,
-        VideoCodecId::H264 { .. } | VideoCodecId::Vp9 | VideoCodecId::Av1
-    ) {
+    if !matches!(config.codec, VideoCodecId::H264 { .. }) {
         return Err(Error::Unsupported);
     }
 
@@ -606,53 +606,91 @@ fn keyframe_from_bitstream(data: &[u8], codec: &VideoCodecId) -> Option<bool> {
 }
 
 /// Scan all NAL units in an H.264 access unit for an IDR slice (type 5).
+/// Handles both 3-byte (`00 00 01`) and 4-byte (`00 00 00 01`) Annex-B
+/// start codes at any NAL position.
 fn h264_has_idr(data: &[u8]) -> Option<bool> {
     let mut pos = 0;
+    let mut found_nal = false;
     while pos < data.len() {
-        let offset = skip_annexb(data.get(pos..)?)?;
+        let Some(offset) = start_code_len_at(data, pos) else {
+            match find_start_code(data, pos + 1) {
+                Some(next) => {
+                    pos = next;
+                    continue;
+                }
+                None => break,
+            }
+        };
         let nal_start = pos + offset;
         if nal_start >= data.len() {
-            return None;
+            break;
         }
+        found_nal = true;
         let nal_type = data[nal_start] & 0x1F;
         if nal_type == 5 {
             return Some(true);
         }
-        let remaining = &data[pos + 1..];
-        let next_start = remaining
-            .windows(3)
-            .position(|w| w == [0, 0, 1])
-            .map(|i| pos + 1 + i)
-            .or_else(|| {
-                remaining
-                    .windows(4)
-                    .position(|w| w == [0, 0, 0, 1])
-                    .map(|i| pos + 1 + i)
-            })
-            .unwrap_or(data.len());
-        pos = next_start;
+        pos = find_start_code(data, nal_start + 1).unwrap_or(data.len());
     }
-    Some(false)
+    if found_nal { Some(false) } else { None }
 }
 
-fn skip_annexb(data: &[u8]) -> Option<usize> {
-    if data.len() > 4 && data[..4] == [0, 0, 0, 1] {
+/// Length of the Annex-B start code at `pos`, or `None`.
+fn start_code_len_at(data: &[u8], pos: usize) -> Option<usize> {
+    let rest = data.get(pos..)?;
+    if rest.len() >= 4 && rest[..4] == [0, 0, 0, 1] {
         Some(4)
-    } else if data.len() > 3 && data[..3] == [0, 0, 1] {
+    } else if rest.len() >= 3 && rest[..3] == [0, 0, 1] {
         Some(3)
     } else {
         None
     }
 }
 
-fn h265_is_idr(data: &[u8]) -> Option<bool> {
-    let offset = skip_annexb(data)?;
-    if offset < data.len() {
-        let nal_type = (data[offset] >> 1) & 0x3F;
-        Some(nal_type == 19 || nal_type == 20 || nal_type == 21)
-    } else {
-        None
+/// Byte offset of the next Annex-B start code at or after `from`.
+/// Prefers the 4-byte form so `00 00 00 01` is found at its true start
+/// rather than one byte in (where only `00 00 01` remains).
+fn find_start_code(data: &[u8], from: usize) -> Option<usize> {
+    let mut i = from;
+    while i + 3 <= data.len() {
+        if data[i] == 0 && data[i + 1] == 0 {
+            if i + 4 <= data.len() && data[i + 2] == 0 && data[i + 3] == 1 {
+                return Some(i);
+            }
+            if data[i + 2] == 1 {
+                return Some(i);
+            }
+        }
+        i += 1;
     }
+    None
+}
+
+fn h265_is_idr(data: &[u8]) -> Option<bool> {
+    let mut pos = 0;
+    let mut found_nal = false;
+    while pos < data.len() {
+        let Some(offset) = start_code_len_at(data, pos) else {
+            match find_start_code(data, pos + 1) {
+                Some(next) => {
+                    pos = next;
+                    continue;
+                }
+                None => break,
+            }
+        };
+        let nal_start = pos + offset;
+        let Some(hdr) = data.get(nal_start..nal_start + 2) else {
+            break;
+        };
+        found_nal = true;
+        let nal_type = (hdr[0] >> 1) & 0x3F;
+        if nal_type == 19 || nal_type == 20 || nal_type == 21 {
+            return Some(true);
+        }
+        pos = find_start_code(data, nal_start + 1).unwrap_or(data.len());
+    }
+    if found_nal { Some(false) } else { None }
 }
 
 fn vp9_is_keyframe(data: &[u8]) -> Option<bool> {
@@ -695,5 +733,66 @@ fn av1_is_keyframe(data: &[u8]) -> Option<bool> {
             }
         }
         // If we've exhausted the data, parser.read_obu returns Err on next call
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h264_single_idr_3byte() {
+        let data = [0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB];
+        assert_eq!(h264_has_idr(&data), Some(true));
+    }
+
+    #[test]
+    fn h264_idr_as_second_nal_with_4byte_code() {
+        let data = [
+            0x00, 0x00, 0x00, 0x01, 0x67, 0xAA, // SPS
+            0x00, 0x00, 0x00, 0x01, 0x65, 0xBB, // IDR
+        ];
+        assert_eq!(h264_has_idr(&data), Some(true));
+    }
+
+    #[test]
+    fn h264_non_idr_returns_false() {
+        let data = [
+            0x00, 0x00, 0x00, 0x01, 0x67, 0xAA, // SPS
+            0x00, 0x00, 0x00, 0x01, 0x68, 0xBB, // PPS
+            0x00, 0x00, 0x01, 0x61, 0xCC, // non-IDR slice (type 1)
+        ];
+        assert_eq!(h264_has_idr(&data), Some(false));
+    }
+
+    #[test]
+    fn h264_length_prefixed_returns_none() {
+        let data = [0x00, 0x00, 0x00, 0x05, 0x65, 0xAA, 0xBB, 0xCC, 0xDD];
+        assert_eq!(h264_has_idr(&data), None);
+    }
+
+    #[test]
+    fn h265_idr_after_parameter_sets() {
+        let data = [
+            0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0xAA, // VPS
+            0x00, 0x00, 0x01, 0x42, 0x01, 0xBB, // SPS
+            0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xCC, // IDR
+        ];
+        assert_eq!(h265_is_idr(&data), Some(true));
+    }
+
+    #[test]
+    fn h265_non_idr_returns_false() {
+        let data = [
+            0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0xAA, // VPS
+            0x00, 0x00, 0x01, 0x02, 0x01, 0xBB, // trailing picture (type 1)
+        ];
+        assert_eq!(h265_is_idr(&data), Some(false));
+    }
+
+    #[test]
+    fn find_start_code_finds_true_4byte_start() {
+        let data = [0xFF, 0x00, 0x00, 0x00, 0x01, 0x65];
+        assert_eq!(find_start_code(&data, 0), Some(1));
     }
 }

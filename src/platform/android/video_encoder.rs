@@ -41,9 +41,12 @@ pub struct AndroidVideoEncoderOutput {
 impl VideoEncoderInput for AndroidVideoEncoderInput {
     fn encode(&mut self, frame: VideoFrame, keyframe: Option<bool>) -> Result<(), Error> {
         self.queue.fetch_add(1, Ordering::Relaxed);
-        self.tx
-            .send(Cmd::Item((frame, keyframe)))
-            .map_err(|_| Error::Dropped)
+        if let Err(e) = self.tx.send(Cmd::Item((frame, keyframe))) {
+            self.queue.fetch_sub(1, Ordering::Relaxed);
+            let _ = e;
+            return Err(Error::Dropped);
+        }
+        Ok(())
     }
 
     async fn flush(&mut self) -> Result<(), Error> {

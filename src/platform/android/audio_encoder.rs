@@ -25,7 +25,13 @@ impl AudioEncoderInput for AndroidAudioEncoderInput {
     fn encode(&mut self, frame: AudioFrame) -> Result<(), Error> {
         self.queue
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.tx.send(Cmd::Item(frame)).map_err(|_| Error::Dropped)
+        if let Err(e) = self.tx.send(Cmd::Item(frame)) {
+            self.queue
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = e;
+            return Err(Error::Dropped);
+        }
+        Ok(())
     }
 
     async fn flush(&mut self) -> Result<(), Error> {
@@ -65,6 +71,12 @@ impl Drop for AndroidAudioEncoderInput {
 pub fn create(
     config: AudioEncoderConfig,
 ) -> Result<(AndroidAudioEncoderInput, AndroidAudioEncoderOutput), Error> {
+    if config.channels == 0 {
+        return Err(Error::InvalidConfig("audio channels must be non-zero".into()));
+    }
+    if config.sample_rate == 0 {
+        return Err(Error::InvalidConfig("audio sample rate must be non-zero".into()));
+    }
     let mut format =
         MediaFormat::new().map_err(|_| Error::Platform("Failed to create MediaFormat".into()))?;
     let _ = format.set_string("mime", config.codec.to_mime());
@@ -136,7 +148,18 @@ fn drain_encoded_output(
     codec: &mut MediaCodec,
     pkt_tx: &mpsc::UnboundedSender<Result<EncodedAudioPacket, Error>>,
 ) {
-    while let Ok(out) = codec.dequeue_output(0) {
+    use anodecs::DequeueOutputError;
+    loop {
+        let out = match codec.dequeue_output(0) {
+            Ok(out) => out,
+            Err(DequeueOutputError::TryAgainLater) => break,
+            Err(DequeueOutputError::OutputFormatChanged)
+            | Err(DequeueOutputError::OutputBuffersChanged) => continue,
+            Err(DequeueOutputError::CodecError(e)) => {
+                let _ = pkt_tx.send(Err(Error::Platform(format!("codec error: {e:?}"))));
+                return;
+            }
+        };
         let out_buf: anodecs::CodecOutputBuffer = out;
         let info = out_buf.info();
         let is_key = false;

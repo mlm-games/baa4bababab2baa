@@ -26,7 +26,13 @@ impl AudioDecoderInput for AndroidAudioDecoderInput {
     fn decode(&mut self, packet: EncodedAudioPacket) -> Result<(), Error> {
         self.queue
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.tx.send(Cmd::Item(packet)).map_err(|_| Error::Dropped)
+        if let Err(e) = self.tx.send(Cmd::Item(packet)) {
+            self.queue
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = e;
+            return Err(Error::Dropped);
+        }
+        Ok(())
     }
 
     async fn flush(&mut self) -> Result<(), Error> {
@@ -58,6 +64,16 @@ impl Drop for AndroidAudioDecoderInput {
 pub fn create(
     config: AudioDecoderConfig,
 ) -> Result<(AndroidAudioDecoderInput, AndroidAudioDecoderOutput), Error> {
+    if config.channel_count == 0 {
+        return Err(Error::InvalidConfig(
+            "audio channels must be non-zero".into(),
+        ));
+    }
+    if config.sample_rate == 0 {
+        return Err(Error::InvalidConfig(
+            "audio sample rate must be non-zero".into(),
+        ));
+    }
     let mut format =
         MediaFormat::new().map_err(|_| Error::Platform("Failed to create MediaFormat".into()))?;
     let _ = format.set_string("mime", config.codec.to_mime());
@@ -135,7 +151,18 @@ fn drain_output(
     fallback_channels: u32,
     fallback_sample_rate: u32,
 ) {
-    while let Ok(out_buf) = codec.dequeue_output(0) {
+    use anodecs::DequeueOutputError;
+    loop {
+        let out_buf = match codec.dequeue_output(0) {
+            Ok(out) => out,
+            Err(DequeueOutputError::TryAgainLater) => break,
+            Err(DequeueOutputError::OutputFormatChanged)
+            | Err(DequeueOutputError::OutputBuffersChanged) => continue,
+            Err(DequeueOutputError::CodecError(e)) => {
+                let _ = frame_tx.send(Err(Error::Platform(format!("codec error: {e:?}"))));
+                return;
+            }
+        };
         let out_buf: CodecOutputBuffer = out_buf;
         let fmt = out_buf.format();
         let channels = fmt

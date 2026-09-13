@@ -48,6 +48,12 @@ impl AudioEncoderInput for WasmAudioEncoderInput {
 
 fn build_audio_data(frame: &AudioFrame) -> Result<AudioData, Error> {
     let channels = frame.channels as usize;
+    if channels == 0 {
+        return Err(Error::InvalidConfig("audio frame has 0 channels".into()));
+    }
+    if frame.sample_rate == 0 {
+        return Err(Error::InvalidConfig("audio frame has 0 sample rate".into()));
+    }
     match frame.format {
         SampleFormat::F32 => {
             let total = frame.samples.len() / 4;
@@ -112,6 +118,12 @@ impl AudioEncoderOutput for WasmAudioEncoderOutput {
 pub fn create(
     config: AudioEncoderConfig,
 ) -> Result<(WasmAudioEncoderInput, WasmAudioEncoderOutput), Error> {
+    if config.channels == 0 {
+        return Err(Error::InvalidConfig("audio channels must be non-zero".into()));
+    }
+    if config.sample_rate == 0 {
+        return Err(Error::InvalidConfig("audio sample rate must be non-zero".into()));
+    }
     let wc_cfg = to_wc_config(&config);
     let (enc, encoded) = wc_cfg
         .init()

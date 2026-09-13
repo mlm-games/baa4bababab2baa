@@ -53,17 +53,59 @@ impl VideoCodecId {
 
     /// Return WebCodecs full codec strings for this codec (WASM target).
     /// Multiple strings are returned for H.264/HEVC to try different profile/level combinations.
-    pub fn to_webcodecs_strings(&self) -> Vec<&str> {
+    ///
+    /// When the `H264` variant carries a known `profile` (profile_idc, e.g.
+    /// 66 Baseline / 77 Main / 100 High) and/or `level` (level_idc, e.g. 30
+    /// for L3.0, 40 for L4.0), matching static entries are ordered first and
+    /// their level suffix is rewritten, so capability probing tries the
+    /// configured profile/level before falling back to the rest.
+    pub fn to_webcodecs_strings(&self) -> Vec<String> {
         match self {
-            VideoCodecId::H264 { .. } => vec![
-                "avc1.42001E",
-                "avc1.42E01E",
-                "avc1.4D001E",
-                "avc1.4D401E",
-                "avc1.64001E",
-                "avc1.640028",
-                "avc1.640032",
-            ],
+            VideoCodecId::H264 { profile, level } => {
+                const STATIC: &[&str] = &[
+                    "avc1.42001E",
+                    "avc1.42E01E",
+                    "avc1.4D001E",
+                    "avc1.4D401E",
+                    "avc1.64001E",
+                    "avc1.640028",
+                    "avc1.640032",
+                ];
+                let prefix = profile.map(|p| match p {
+                    66 => "42",
+                    77 => "4D",
+                    88 => "58",
+                    100 => "64",
+                    110 => "6E",
+                    122 => "7A",
+                    244 => "F4",
+                    _ => "",
+                });
+                let level_hex = level
+                    .filter(|&l| l != 0 && l <= 255)
+                    .map(|l| format!("{l:02X}"));
+
+                let mut ordered: Vec<String> = STATIC
+                    .iter()
+                    .map(|s| {
+                        let mut s = s.to_string();
+                        if let Some(hex) = &level_hex {
+                            if s.len() == "avc1.XXXXXX".len() {
+                                s.replace_range(s.len() - 2.., hex);
+                            }
+                        }
+                        s
+                    })
+                    .collect();
+                if let Some(prefix) = prefix {
+                    if !prefix.is_empty() {
+                        ordered.sort_by_key(|s| {
+                            !s.get(5..7).is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+                        });
+                    }
+                }
+                ordered
+            }
             VideoCodecId::Hevc => vec![
                 "hvc1.1.6.L93.B0",
                 "hev1.1.6.L93.B0",
@@ -77,11 +119,14 @@ impl VideoCodecId {
                 "hev1.1.6.L153.B0",
                 "hvc1.2.4.L120.B0",
                 "hev1.2.4.L120.B0",
-            ],
-            VideoCodecId::Av1 => vec!["av01.0.04M.08"],
-            VideoCodecId::Vp9 => vec!["vp09.00.10.08"],
-            VideoCodecId::Vp8 => vec!["vp8"],
-            VideoCodecId::Other(s) => vec![s.as_str()],
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            VideoCodecId::Av1 => vec!["av01.0.04M.08".to_string()],
+            VideoCodecId::Vp9 => vec!["vp09.00.10.08".to_string()],
+            VideoCodecId::Vp8 => vec!["vp8".to_string()],
+            VideoCodecId::Other(s) => vec![s.clone()],
         }
     }
 }
@@ -95,6 +140,43 @@ impl fmt::Display for VideoCodecId {
 impl From<&str> for VideoCodecId {
     fn from(s: &str) -> Self {
         VideoCodecId::from_mime(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h264_default_keeps_static_list() {
+        let strings = VideoCodecId::H264 {
+            profile: None,
+            level: None,
+        }
+        .to_webcodecs_strings();
+        assert_eq!(strings.len(), 7);
+        assert_eq!(strings[0], "avc1.42001E");
+    }
+
+    #[test]
+    fn h264_profile_orders_matching_prefix_first() {
+        let strings = VideoCodecId::H264 {
+            profile: Some(100),
+            level: None,
+        }
+        .to_webcodecs_strings();
+        assert!(strings[0].starts_with("avc1.64"));
+        assert!(strings.iter().any(|s| s.starts_with("avc1.42")));
+    }
+
+    #[test]
+    fn h264_level_rewrites_suffix() {
+        let strings = VideoCodecId::H264 {
+            profile: None,
+            level: Some(40),
+        }
+        .to_webcodecs_strings();
+        assert!(strings.iter().all(|s| s.ends_with("28")));
     }
 }
 

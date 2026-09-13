@@ -19,8 +19,7 @@ pub(super) fn to_wc_config(cfg: &VideoEncoderConfig) -> WcVideoEncoderConfig {
         .to_webcodecs_strings()
         .into_iter()
         .next()
-        .unwrap_or(cfg.codec.to_mime())
-        .to_string();
+        .unwrap_or_else(|| cfg.codec.to_mime().to_string());
 
     let mut wc = WcVideoEncoderConfig::new(
         &codec,
