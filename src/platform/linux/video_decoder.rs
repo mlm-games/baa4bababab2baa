@@ -88,7 +88,7 @@ impl VideoDecoderOutput for CrosVideoDecoderOutput {
             Ok(Ok(frame)) => Ok(Some(frame)),
             Ok(Err(e)) => Err(e),
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::error::TryRecvError::Disconnected) => Err(Error::Dropped),
+            Err(mpsc::error::TryRecvError::Disconnected) => Ok(None),
         }
     }
 }

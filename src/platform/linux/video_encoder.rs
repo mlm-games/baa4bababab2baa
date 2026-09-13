@@ -595,7 +595,7 @@ fn keyframe_from_bitstream(data: &[u8], codec: &VideoCodecId) -> Option<bool> {
     match codec {
         VideoCodecId::H264 { .. } => h264_has_idr(data),
 
-        VideoCodecId::Hevc => h265_is_idr(data),
+        VideoCodecId::Hevc => h265_is_irap(data),
 
         VideoCodecId::Vp9 => vp9_is_keyframe(data),
 
@@ -666,7 +666,11 @@ fn find_start_code(data: &[u8], from: usize) -> Option<usize> {
     None
 }
 
-fn h265_is_idr(data: &[u8]) -> Option<bool> {
+/// Scan all NAL units for an HEVC IRAP picture (types 16-23).
+/// Returns true for IDR_W_RADL (19), IDR_N_LP (20) and CRA_NUT (21).
+/// Named `is_irap` (not `is_idr`) because CRA (21) is a random access
+/// point but not an IDR picture.
+fn h265_is_irap(data: &[u8]) -> Option<bool> {
     let mut pos = 0;
     let mut found_nal = false;
     while pos < data.len() {
@@ -778,7 +782,7 @@ mod tests {
             0x00, 0x00, 0x01, 0x42, 0x01, 0xBB, // SPS
             0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xCC, // IDR
         ];
-        assert_eq!(h265_is_idr(&data), Some(true));
+        assert_eq!(h265_is_irap(&data), Some(true));
     }
 
     #[test]
@@ -787,7 +791,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0xAA, // VPS
             0x00, 0x00, 0x01, 0x02, 0x01, 0xBB, // trailing picture (type 1)
         ];
-        assert_eq!(h265_is_idr(&data), Some(false));
+        assert_eq!(h265_is_irap(&data), Some(false));
     }
 
     #[test]
