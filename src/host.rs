@@ -12,6 +12,9 @@ use crate::platform::android::MediaCodecHost;
 #[cfg(all(target_os = "linux", feature = "linux"))]
 use crate::platform::linux::CrosCodecsHost;
 
+#[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+use crate::platform::apple::VideoToolboxHost;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostId {
     #[cfg(target_arch = "wasm32")]
@@ -20,10 +23,13 @@ pub enum HostId {
     MediaCodec,
     #[cfg(all(target_os = "linux", feature = "linux"))]
     CrosCodecs,
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+    VideoToolbox,
     #[cfg(not(any(
         target_arch = "wasm32",
         target_os = "android",
-        all(target_os = "linux", feature = "linux")
+        all(target_os = "linux", feature = "linux"),
+        all(any(target_os = "macos", target_os = "ios"), feature = "apple")
     )))]
     NoBackend,
 }
@@ -35,11 +41,14 @@ pub enum Host {
     MediaCodec(MediaCodecHost),
     #[cfg(all(target_os = "linux", feature = "linux"))]
     CrosCodecs(CrosCodecsHost),
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+    VideoToolbox(VideoToolboxHost),
 
     #[cfg(not(any(
         target_arch = "wasm32",
         target_os = "android",
-        all(target_os = "linux", feature = "linux")
+        all(target_os = "linux", feature = "linux"),
+        all(any(target_os = "macos", target_os = "ios"), feature = "apple")
     )))]
     NoBackend,
 }
@@ -54,10 +63,14 @@ pub fn default_host() -> Host {
     #[cfg(all(target_os = "linux", feature = "linux"))]
     return Host::CrosCodecs(CrosCodecsHost::new());
 
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+    return Host::VideoToolbox(VideoToolboxHost::new());
+
     #[cfg(not(any(
         target_arch = "wasm32",
         target_os = "android",
-        all(target_os = "linux", feature = "linux")
+        all(target_os = "linux", feature = "linux"),
+        all(any(target_os = "macos", target_os = "ios"), feature = "apple")
     )))]
     return Host::NoBackend;
 }
@@ -70,10 +83,13 @@ pub fn host_from_id(id: HostId) -> Result<Host, Error> {
         HostId::MediaCodec => Ok(Host::MediaCodec(MediaCodecHost::new())),
         #[cfg(all(target_os = "linux", feature = "linux"))]
         HostId::CrosCodecs => Ok(Host::CrosCodecs(CrosCodecsHost::new())),
+        #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+        HostId::VideoToolbox => Ok(Host::VideoToolbox(VideoToolboxHost::new())),
         #[cfg(not(any(
             target_arch = "wasm32",
             target_os = "android",
-            all(target_os = "linux", feature = "linux")
+            all(target_os = "linux", feature = "linux"),
+            all(any(target_os = "macos", target_os = "ios"), feature = "apple")
         )))]
         HostId::NoBackend => Err(Error::NoBackend),
     }
@@ -82,56 +98,65 @@ pub fn host_from_id(id: HostId) -> Result<Host, Error> {
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 struct NoBackendVideoEncoderInput;
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 struct NoBackendVideoEncoderOutput;
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 struct NoBackendVideoDecoderInput;
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 struct NoBackendVideoDecoderOutput;
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 struct NoBackendAudioEncoderInput;
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 struct NoBackendAudioEncoderOutput;
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 struct NoBackendAudioDecoderInput;
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 struct NoBackendAudioDecoderOutput;
 
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 impl crate::traits::VideoEncoderInput for NoBackendVideoEncoderInput {
     fn encode(
@@ -158,7 +183,8 @@ impl crate::traits::VideoEncoderInput for NoBackendVideoEncoderInput {
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 impl crate::traits::VideoEncoderOutput for NoBackendVideoEncoderOutput {
     async fn packet(&mut self) -> Result<Option<crate::types::EncodedVideoPacket>, Error> {
@@ -173,7 +199,8 @@ impl crate::traits::VideoEncoderOutput for NoBackendVideoEncoderOutput {
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 impl crate::traits::VideoDecoderInput for NoBackendVideoDecoderInput {
     fn decode(&mut self, _packet: crate::types::EncodedVideoPacket) -> Result<(), Error> {
@@ -192,7 +219,8 @@ impl crate::traits::VideoDecoderInput for NoBackendVideoDecoderInput {
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 impl crate::traits::VideoDecoderOutput for NoBackendVideoDecoderOutput {
     async fn frame(&mut self) -> Result<Option<crate::types::VideoFrame>, Error> {
@@ -207,7 +235,8 @@ impl crate::traits::VideoDecoderOutput for NoBackendVideoDecoderOutput {
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 impl crate::traits::AudioEncoderInput for NoBackendAudioEncoderInput {
     fn encode(&mut self, _frame: crate::types::AudioFrame) -> Result<(), Error> {
@@ -230,7 +259,8 @@ impl crate::traits::AudioEncoderInput for NoBackendAudioEncoderInput {
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 impl crate::traits::AudioEncoderOutput for NoBackendAudioEncoderOutput {
     async fn packet(&mut self) -> Result<Option<crate::types::EncodedAudioPacket>, Error> {
@@ -245,7 +275,8 @@ impl crate::traits::AudioEncoderOutput for NoBackendAudioEncoderOutput {
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 impl crate::traits::AudioDecoderInput for NoBackendAudioDecoderInput {
     fn decode(&mut self, _packet: crate::types::EncodedAudioPacket) -> Result<(), Error> {
@@ -264,7 +295,8 @@ impl crate::traits::AudioDecoderInput for NoBackendAudioDecoderInput {
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "android",
-    all(target_os = "linux", feature = "linux")
+    all(target_os = "linux", feature = "linux"),
+    all(any(target_os = "macos", target_os = "ios"), feature = "apple")
 )))]
 impl crate::traits::AudioDecoderOutput for NoBackendAudioDecoderOutput {
     async fn frame(&mut self) -> Result<Option<crate::types::AudioFrame>, Error> {
@@ -290,10 +322,13 @@ impl Host {
             Host::MediaCodec(h) => h.create_video_encoder(_config),
             #[cfg(all(target_os = "linux", feature = "linux"))]
             Host::CrosCodecs(h) => h.create_video_encoder(_config),
+            #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+            Host::VideoToolbox(h) => h.create_video_encoder(_config),
             #[cfg(not(any(
                 target_arch = "wasm32",
                 target_os = "android",
-                all(target_os = "linux", feature = "linux")
+                all(target_os = "linux", feature = "linux"),
+                all(any(target_os = "macos", target_os = "ios"), feature = "apple")
             )))]
             Host::NoBackend => Err::<
                 (NoBackendVideoEncoderInput, NoBackendVideoEncoderOutput),
@@ -319,10 +354,13 @@ impl Host {
             Host::MediaCodec(h) => h.create_video_decoder(_config),
             #[cfg(all(target_os = "linux", feature = "linux"))]
             Host::CrosCodecs(h) => h.create_video_decoder(_config),
+            #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+            Host::VideoToolbox(h) => h.create_video_decoder(_config),
             #[cfg(not(any(
                 target_arch = "wasm32",
                 target_os = "android",
-                all(target_os = "linux", feature = "linux")
+                all(target_os = "linux", feature = "linux"),
+                all(any(target_os = "macos", target_os = "ios"), feature = "apple")
             )))]
             Host::NoBackend => Err::<
                 (NoBackendVideoDecoderInput, NoBackendVideoDecoderOutput),
@@ -348,10 +386,13 @@ impl Host {
             Host::MediaCodec(h) => h.create_audio_encoder(_config),
             #[cfg(all(target_os = "linux", feature = "linux"))]
             Host::CrosCodecs(h) => h.create_audio_encoder(_config),
+            #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+            Host::VideoToolbox(h) => h.create_audio_encoder(_config),
             #[cfg(not(any(
                 target_arch = "wasm32",
                 target_os = "android",
-                all(target_os = "linux", feature = "linux")
+                all(target_os = "linux", feature = "linux"),
+                all(any(target_os = "macos", target_os = "ios"), feature = "apple")
             )))]
             Host::NoBackend => Err::<
                 (NoBackendAudioEncoderInput, NoBackendAudioEncoderOutput),
@@ -377,10 +418,13 @@ impl Host {
             Host::MediaCodec(h) => h.create_audio_decoder(_config),
             #[cfg(all(target_os = "linux", feature = "linux"))]
             Host::CrosCodecs(h) => h.create_audio_decoder(_config),
+            #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+            Host::VideoToolbox(h) => h.create_audio_decoder(_config),
             #[cfg(not(any(
                 target_arch = "wasm32",
                 target_os = "android",
-                all(target_os = "linux", feature = "linux")
+                all(target_os = "linux", feature = "linux"),
+                all(any(target_os = "macos", target_os = "ios"), feature = "apple")
             )))]
             Host::NoBackend => Err::<
                 (NoBackendAudioDecoderInput, NoBackendAudioDecoderOutput),
@@ -400,10 +444,13 @@ impl Host {
             Host::MediaCodec(h) => h.is_video_encoder_supported(_config).await,
             #[cfg(all(target_os = "linux", feature = "linux"))]
             Host::CrosCodecs(h) => h.is_video_encoder_supported(_config).await,
+            #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+            Host::VideoToolbox(h) => h.is_video_encoder_supported(_config).await,
             #[cfg(not(any(
                 target_arch = "wasm32",
                 target_os = "android",
-                all(target_os = "linux", feature = "linux")
+                all(target_os = "linux", feature = "linux"),
+                all(any(target_os = "macos", target_os = "ios"), feature = "apple")
             )))]
             Host::NoBackend => Ok(false),
         }
@@ -420,10 +467,13 @@ impl Host {
             Host::MediaCodec(h) => h.is_video_decoder_supported(_config).await,
             #[cfg(all(target_os = "linux", feature = "linux"))]
             Host::CrosCodecs(h) => h.is_video_decoder_supported(_config).await,
+            #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+            Host::VideoToolbox(h) => h.is_video_decoder_supported(_config).await,
             #[cfg(not(any(
                 target_arch = "wasm32",
                 target_os = "android",
-                all(target_os = "linux", feature = "linux")
+                all(target_os = "linux", feature = "linux"),
+                all(any(target_os = "macos", target_os = "ios"), feature = "apple")
             )))]
             Host::NoBackend => Ok(false),
         }
@@ -440,10 +490,13 @@ impl Host {
             Host::MediaCodec(h) => h.is_audio_encoder_supported(_config).await,
             #[cfg(all(target_os = "linux", feature = "linux"))]
             Host::CrosCodecs(h) => h.is_audio_encoder_supported(_config).await,
+            #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+            Host::VideoToolbox(h) => h.is_audio_encoder_supported(_config).await,
             #[cfg(not(any(
                 target_arch = "wasm32",
                 target_os = "android",
-                all(target_os = "linux", feature = "linux")
+                all(target_os = "linux", feature = "linux"),
+                all(any(target_os = "macos", target_os = "ios"), feature = "apple")
             )))]
             Host::NoBackend => Ok(false),
         }
@@ -460,10 +513,13 @@ impl Host {
             Host::MediaCodec(h) => h.is_audio_decoder_supported(_config).await,
             #[cfg(all(target_os = "linux", feature = "linux"))]
             Host::CrosCodecs(h) => h.is_audio_decoder_supported(_config).await,
+            #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "apple"))]
+            Host::VideoToolbox(h) => h.is_audio_decoder_supported(_config).await,
             #[cfg(not(any(
                 target_arch = "wasm32",
                 target_os = "android",
-                all(target_os = "linux", feature = "linux")
+                all(target_os = "linux", feature = "linux"),
+                all(any(target_os = "macos", target_os = "ios"), feature = "apple")
             )))]
             Host::NoBackend => Ok(false),
         }

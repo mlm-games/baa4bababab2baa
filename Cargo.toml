@@ -17,7 +17,7 @@ linux = [
     "nuxodecs/av1",
     "nuxodecs/gbm",
 ]
-apple = ["dep:videotoolbox-rs"]
+apple = ["dep:oxideav-videotoolbox", "dep:oxideav-core"]
 
 [dependencies]
 thiserror = "2"
@@ -49,11 +49,9 @@ web-sys = { version = "0.3", features = [
 ] }
 wasodecs = "0.3"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-videotoolbox-rs = { version = "0.1", optional = true }
-
-[target.'cfg(target_os = "ios")'.dependencies]
-videotoolbox-rs = { version = "0.1", optional = true }
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+oxideav-videotoolbox = { version = "0.0.3", optional = true }
+oxideav-core = { version = "0.1", optional = true }
 
 # [patch.crates-io]
 # wasodecs = { path = "../web-rs/wasodecs" }
