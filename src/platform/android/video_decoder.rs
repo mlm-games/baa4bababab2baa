@@ -238,9 +238,8 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
     match color_format {
         anodecs::ColorFormat::Yuv420SemiPlanar
         | anodecs::ColorFormat::Yuv420Flexible
-        | anodecs::ColorFormat::Yuv420SemiPlanarVendorA
-        | anodecs::ColorFormat::Yuv420FlexibleVendorA
-        | anodecs::ColorFormat::Yuv420FlexibleVendorB => {
+        | anodecs::ColorFormat::Yuv420PackedSemiPlanar
+        | anodecs::ColorFormat::QcomYuv420SemiPlanar => {
             // COLOR_FormatYUV420SemiPlanar (NV12) or compatible vendor formats
             let y_size = stride * slice_h;
             let uv_h = h / 2;
@@ -329,7 +328,7 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
                 planes: VideoPlanes::Cpu(out),
             })
         }
-        anodecs::ColorFormat::P010 => {
+        anodecs::ColorFormat::YuvP010 => {
             // 10-bit semi-planar: Y and interleaved UV are 16-bit
             // little-endian words with the 10-bit sample in the high bits.
             // Downconvert to 8-bit NV12 by keeping the high byte of each word
@@ -368,7 +367,9 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
                 planes: VideoPlanes::Cpu(out),
             })
         }
-        anodecs::ColorFormat::TiYuv420PackedSemiPlanar | anodecs::ColorFormat::Unknown(other) => {
+        anodecs::ColorFormat::TiYuv420PackedSemiPlanar
+        | anodecs::ColorFormat::Surface
+        | anodecs::ColorFormat::Unknown(other) => {
             Err(crate::error::MediaFailure::new(
                 crate::error::MediaFailureCode::UnsupportedOutputFormat,
                 format!("unsupported MediaCodec color-format: {other}"),
