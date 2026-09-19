@@ -369,10 +369,10 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
         }
         anodecs::ColorFormat::TiYuv420PackedSemiPlanar
         | anodecs::ColorFormat::Surface
-        | anodecs::ColorFormat::Unknown(other) => {
+        | anodecs::ColorFormat::Unknown(_) => {
             Err(crate::error::MediaFailure::new(
                 crate::error::MediaFailureCode::UnsupportedOutputFormat,
-                format!("unsupported MediaCodec color-format: {other}"),
+                format!("unsupported MediaCodec color-format: {color_format:?}"),
             )
             .backend("android")
             .into())
