@@ -143,6 +143,7 @@ impl WasmVideoEncoderOutput {
                     .resolution
                     .map(|d| Dimensions::new(d.width, d.height)),
                 description: wc_cfg.description.clone(),
+                description_format: None,
                 hardware_acceleration: wc_cfg.hardware_acceleration,
                 output_mode: VideoOutputMode::Cpu,
             });

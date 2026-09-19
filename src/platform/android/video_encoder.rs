@@ -406,6 +406,7 @@ fn drain_encoded_output(
                                     dimensions.height,
                                 )),
                                 description: Some(bytes::Bytes::from(data)),
+                                description_format: None,
                                 hardware_acceleration: None,
                                 output_mode: VideoOutputMode::Cpu,
                             });
