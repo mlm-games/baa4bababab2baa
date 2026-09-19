@@ -27,7 +27,7 @@ use nuxodecs::{
     libva,
     utils::align_up,
     video_frame::{
-        UV_PLANE, VideoFrame as CcVideoFrame, Y_PLANE,
+        FrameMapError, UV_PLANE, VideoFrame as CcVideoFrame, Y_PLANE,
         generic_dma_video_frame::GenericDmaVideoFrame,
     },
 };
@@ -277,6 +277,9 @@ fn worker_loop(
         height: 0,
     };
     let mut cached_format = nuxodecs::DecodedFormat::NV12;
+    // Whether the cheap direct VA surface mapping is known to work for this
+    // stream.
+    let mut readback_mode: Option<CpuReadbackMode> = None;
 
     let va_display_clone = va_display.clone();
     let mut alloc_frame = move |stream_info: &StreamInfo| -> Result<GenericDmaVideoFrame, Error> {
@@ -319,6 +322,7 @@ fn worker_loop(
                             &mut cached_display,
                             &mut cached_format,
                             output_mode,
+                            &mut readback_mode,
                         )?;
                     }
                     Ok(())
@@ -377,6 +381,7 @@ fn worker_loop(
                             &mut cached_display,
                             &mut cached_format,
                             output_mode,
+                            &mut readback_mode,
                         )?;
                     }
 
@@ -393,6 +398,12 @@ fn worker_loop(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpuReadbackMode {
+    DirectMap,
+    VaApiDownload,
+}
+
 fn drain_events<F: CcVideoFrame + 'static>(
     dec: &mut DynStatelessVideoDecoder<F>,
     frame_queue: &mut Vec<GenericDmaVideoFrame>,
@@ -405,6 +416,7 @@ fn drain_events<F: CcVideoFrame + 'static>(
     cached_display: &mut Resolution,
     cached_format: &mut nuxodecs::DecodedFormat,
     output_mode: VideoOutputMode,
+    readback_mode: &mut Option<CpuReadbackMode>,
 ) -> Result<usize, Error> {
     let mut count = 0;
     while let Some(ev) = dec.next_event() {
@@ -438,12 +450,24 @@ fn drain_events<F: CcVideoFrame + 'static>(
                                 eprintln!(
                                     "[VAAPI] gdma_to_hardware failed: {e:?}, falling back to CPU"
                                 );
-                                cpu_path(&*frame_arc, ts, *cached_format, va_display)?
+                                cpu_path_cached(
+                                    &*frame_arc,
+                                    ts,
+                                    *cached_format,
+                                    va_display,
+                                    readback_mode,
+                                )?
                             }
                             Err(e) => return Err(e),
                         }
                     }
-                    VideoOutputMode::Cpu => cpu_path(&*frame_arc, ts, *cached_format, va_display)?,
+                    VideoOutputMode::Cpu => cpu_path_cached(
+                        &*frame_arc,
+                        ts,
+                        *cached_format,
+                        va_display,
+                        readback_mode,
+                    )?,
                 };
                 frame_tx.send(Ok(out)).map_err(|_| Error::Dropped)?;
                 count += 1;
@@ -463,21 +487,61 @@ fn drain_events<F: CcVideoFrame + 'static>(
     Ok(count)
 }
 
+fn cpu_path_cached<F: CcVideoFrame + 'static>(
+    frame: &F,
+    ts: Timestamp,
+    fmt: nuxodecs::DecodedFormat,
+    va_display: &Arc<libva::Display>,
+    readback_mode: &mut Option<CpuReadbackMode>,
+) -> Result<VideoFrame, Error> {
+    match fmt {
+        DecodedFormat::I010 | DecodedFormat::I210 | DecodedFormat::I410 => {
+            p010_frame_to_i010(frame, ts).map_err(Error::from)
+        }
+        _ => match *readback_mode {
+            // Direct mapping already failed once for this stream: go straight
+            // to the VA-API image download without retrying or re-logging.
+            Some(CpuReadbackMode::VaApiDownload) => {
+                nv12_frame_to_i420_via_vaapi(frame, ts, va_display)
+            }
+            // Direct mapping is known good (or not yet probed): try it first.
+            Some(CpuReadbackMode::DirectMap) | None => {
+                match nv12_frame_to_i420(frame, ts) {
+                    Ok(out) => {
+                        *readback_mode = Some(CpuReadbackMode::DirectMap);
+                        Ok(out)
+                    }
+                    // Probe failed with a permanently unsupported layout: pin
+                    // the VA-API download path for the rest of the stream,
+                    // warn once, and deliver this frame via the fallback. only
+                    // a double failure falls back to software. Any other
+                    // mapping failure surfaces immediately.
+                    Err(FrameMapError::UnsupportedModifier(_))
+                    | Err(FrameMapError::UnsupportedTiling(_))
+                        if readback_mode.is_none() =>
+                    {
+                        eprintln!(
+                            "[VAAPI] Direct surface mapping unavailable; using VA-API image download for this stream"
+                        );
+                        *readback_mode = Some(CpuReadbackMode::VaApiDownload);
+                        nv12_frame_to_i420_via_vaapi(frame, ts, va_display)
+                    }
+                    Err(error) => Err(Error::Platform(error.to_string())),
+                }
+            }
+        },
+    }
+}
+
+#[cfg(test)]
 fn cpu_path<F: CcVideoFrame + 'static>(
     frame: &F,
     ts: Timestamp,
     fmt: nuxodecs::DecodedFormat,
     va_display: &Arc<libva::Display>,
 ) -> Result<VideoFrame, Error> {
-    match fmt {
-        DecodedFormat::I010 | DecodedFormat::I210 | DecodedFormat::I410 => {
-            p010_frame_to_i010(frame, ts)
-        }
-        _ => nv12_frame_to_i420(frame, ts).or_else(|e| {
-            eprintln!("[VAAPI] nv12_frame_to_i420 failed: {e:?}, trying VA-API fallback");
-            nv12_frame_to_i420_via_vaapi(frame, ts, va_display)
-        }),
-    }
+    let mut mode = None;
+    cpu_path_cached(frame, ts, fmt, va_display, &mut mode)
 }
 
 fn gdma_to_hardware<F: CcVideoFrame + 'static>(
@@ -570,14 +634,14 @@ pub(crate) fn dmabuf_copy_to_cpu(
     Ok((PixelFormat::Nv12, v))
 }
 
-fn nv12_frame_to_nv12_packed<F: CcVideoFrame>(frame: &F) -> Result<Vec<u8>, Error> {
+fn nv12_frame_to_nv12_packed<F: CcVideoFrame>(frame: &F) -> Result<Vec<u8>, FrameMapError> {
     let res = frame.resolution();
     let w = res.width as usize;
     let h = res.height as usize;
     let mut out = vec![0u8; w * h * 3 / 2];
     let (dst_y, dst_uv) = out.split_at_mut(w * h);
     let pitches = frame.get_plane_pitch();
-    let mapping = frame.map().map_err(|e| Error::Platform(format!("{e:?}")))?;
+    let mapping = frame.map()?;
     let planes = mapping.get();
     let y_pitch = pitches[Y_PLANE];
     let uv_pitch = pitches[UV_PLANE];
@@ -748,7 +812,7 @@ fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(
 fn p010_frame_to_i010<F: CcVideoFrame>(
     frame: &F,
     timestamp: Timestamp,
-) -> Result<VideoFrame, Error> {
+) -> Result<VideoFrame, FrameMapError> {
     let res = frame.resolution();
     let width = res.width as usize;
     let height = res.height as usize;
@@ -762,7 +826,7 @@ fn p010_frame_to_i010<F: CcVideoFrame>(
     let (dst_u, dst_v) = dst_uv.split_at_mut(chroma_size);
 
     let pitches = frame.get_plane_pitch();
-    let mapping = frame.map().map_err(|e| Error::Platform(format!("{e:?}")))?;
+    let mapping = frame.map()?;
     let planes = mapping.get();
 
     let src_y = planes[Y_PLANE];
@@ -803,7 +867,7 @@ fn p010_frame_to_i010<F: CcVideoFrame>(
 fn nv12_frame_to_i420<F: CcVideoFrame>(
     frame: &F,
     timestamp: Timestamp,
-) -> Result<VideoFrame, Error> {
+) -> Result<VideoFrame, FrameMapError> {
     let res = frame.resolution();
     let width = res.width as usize;
     let height = res.height as usize;
@@ -817,7 +881,7 @@ fn nv12_frame_to_i420<F: CcVideoFrame>(
     let (dst_u, dst_v) = dst_uv.split_at_mut(chroma_size);
 
     let pitches = frame.get_plane_pitch();
-    let mapping = frame.map().map_err(|e| Error::Platform(format!("{e:?}")))?;
+    let mapping = frame.map()?;
     let planes = mapping.get();
 
     nv12_to_i420(

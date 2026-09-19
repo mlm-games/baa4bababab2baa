@@ -539,6 +539,7 @@ pub fn create_encoder(
         codec: config.codec.clone(),
         resolution: Some(config.dimensions),
         description: None,
+        description_format: None,
         hardware_acceleration: None,
         output_mode: crate::types::VideoOutputMode::Cpu,
     };

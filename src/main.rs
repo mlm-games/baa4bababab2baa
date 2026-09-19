@@ -11,6 +11,7 @@ fn main() {
         codec: "video/avc".into(),
         resolution: Some(Dimensions::new(1920, 1080)),
         description: None,
+        description_format: None,
         hardware_acceleration: None,
         output_mode: VideoOutputMode::Cpu,
     };

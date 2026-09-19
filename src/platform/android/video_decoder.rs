@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use anodecs::{BufferFlag, DequeueOutputError, MediaCodec, MediaFormat};
+use anodecs::{BufferFlag, DequeueInputError, DequeueOutputError, MediaCodec, MediaFormat};
 use log::info;
 use tokio::sync::{mpsc, oneshot};
 
@@ -107,17 +107,48 @@ pub fn create(
     }
 
     if let Some(desc) = &config.description {
-        let csd_first: Vec<u8> = desc.iter().take(8).copied().collect();
-        info!(
-            "decoder csd-0: {} bytes, first={:02x?}, starts_with_annexb={}",
-            desc.len(),
-            csd_first,
-            desc.len() >= 4 && (desc[..4] == [0x00, 0x00, 0x00, 0x01])
-        );
-        if desc.len() >= 4 && desc[..4] != [0x00, 0x00, 0x00, 0x01] && desc[0] == 1 {
-            info!("decoder csd-0: appears to be hvcC/avcC format (version=1)");
+        match config.description_format {
+            Some(
+                crate::types::VideoDescriptionFormat::AvcC
+                | crate::types::VideoDescriptionFormat::HvcC
+                | crate::types::VideoDescriptionFormat::Av1C
+                | crate::types::VideoDescriptionFormat::CodecPrivate,
+            ) => {
+                info!(
+                    "decoder csd-0: {} bytes, format={:?}",
+                    desc.len(),
+                    config.description_format
+                );
+                let _ = format.set_buffer("csd-0", desc);
+            }
+            // Declared Annex-B or sequence-header data is not valid csd-0.
+            // MediaCodec expects avcC/hvcC here, so refuse loudly instead of
+            // feeding SPS/PPS bytes the decoder will misparse. Miniter-style
+            // callers prepend Annex-B config to the first keyframe in-band,
+            // so dropping csd-0 keeps the stream decodable.
+            Some(
+                crate::types::VideoDescriptionFormat::AnnexB
+                | crate::types::VideoDescriptionFormat::Av1SequenceHeaderObu,
+            ) => {
+                info!(
+                    "decoder csd-0: skipping {:?} config ({} bytes); relying on in-band parameter sets",
+                    config.description_format,
+                    desc.len()
+                );
+            }
+            // keep the previous lenient behavior so existing
+            // callers that pass avcC/hvcC without a format keep working.
+            None => {
+                let csd_first: Vec<u8> = desc.iter().take(8).copied().collect();
+                info!(
+                    "decoder csd-0: {} bytes (format undeclared), first={:02x?}, starts_with_annexb={}",
+                    desc.len(),
+                    csd_first,
+                    desc.len() >= 4 && (desc[..4] == [0x00, 0x00, 0x00, 0x01])
+                );
+                let _ = format.set_buffer("csd-0", desc);
+            }
         }
-        let _ = format.set_buffer("csd-0", desc);
     }
 
     info!(
@@ -186,13 +217,30 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
     let stride = fmt.get_i32("stride").unwrap_or(fmt_w as i32) as usize;
     let slice_h = fmt.get_i32("slice-height").unwrap_or(fmt_h as i32) as usize;
 
-    let color_format = fmt.get_i32("color-format").unwrap_or(21) as u32;
+    // A missing color-format key historically defaulted to NV12. Report it
+    // explicitly instead so callers can distinguish "known NV12" from
+    // "decoder did not report a layout".
+    let color_format = match fmt.color_format() {
+        Some(cf) => cf,
+        None => {
+            return Err(crate::error::MediaFailure::new(
+                crate::error::MediaFailureCode::UnsupportedOutputFormat,
+                "MediaCodec output omitted color-format; refusing to assume NV12",
+            )
+            .backend("android")
+            .into());
+        }
+    };
 
     let w = vis_w as usize;
     let h = vis_h as usize;
 
     match color_format {
-        21 | 2141391876 | 2141391878 | 2130708361 => {
+        anodecs::ColorFormat::Yuv420SemiPlanar
+        | anodecs::ColorFormat::Yuv420Flexible
+        | anodecs::ColorFormat::Yuv420SemiPlanarVendorA
+        | anodecs::ColorFormat::Yuv420FlexibleVendorA
+        | anodecs::ColorFormat::Yuv420FlexibleVendorB => {
             // COLOR_FormatYUV420SemiPlanar (NV12) or compatible vendor formats
             let y_size = stride * slice_h;
             let uv_h = h / 2;
@@ -231,7 +279,7 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
                 planes: VideoPlanes::Cpu(out),
             })
         }
-        19 | 2141391872 | 2130706688 => {
+        anodecs::ColorFormat::Yuv420Planar | anodecs::ColorFormat::Yuv420PackedPlanar => {
             // COLOR_FormatYUV420Planar (I420) or compatible vendor formats
             let y_size = stride * slice_h;
             let uv_stride = stride / 2;
@@ -281,9 +329,53 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
                 planes: VideoPlanes::Cpu(out),
             })
         }
-        other => Err(Error::Platform(format!(
-            "unsupported MediaCodec color-format: {other}"
-        ))),
+        anodecs::ColorFormat::P010 => {
+            // 10-bit semi-planar: Y and interleaved UV are 16-bit
+            // little-endian words with the 10-bit sample in the high bits.
+            // Downconvert to 8-bit NV12 by keeping the high byte of each word
+            let y_size = stride * slice_h * 2;
+            let uv_h = h / 2;
+            let uv_crop_top = crop_top as usize / 2;
+            let expected = y_size + uv_h * stride * 2;
+            if raw.len() < expected {
+                return Err(Error::Platform(format!(
+                    "P010 buffer too small: {} < {}",
+                    raw.len(),
+                    expected
+                )));
+            }
+            let mut out = vec![0u8; w * h * 3 / 2];
+            let (out_y, out_uv) = out.split_at_mut(w * h);
+            let crop_l = crop_left as usize;
+            for row in 0..h {
+                let src_row = (crop_top as usize + row) * stride * 2 + crop_l * 2;
+                let dst_start = row * w;
+                for col in 0..w {
+                    out_y[dst_start + col] = raw[src_row + col * 2 + 1];
+                }
+            }
+            for row in 0..uv_h {
+                let src_row = y_size + (uv_crop_top + row) * stride * 2 + crop_l * 2;
+                let dst_start = row * w;
+                for col in 0..w {
+                    out_uv[dst_start + col] = raw[src_row + col * 2 + 1];
+                }
+            }
+            Ok(VideoFrame {
+                dimensions: Dimensions::new(vis_w, vis_h),
+                format: PixelFormat::Nv12,
+                timestamp: std::time::Duration::from_micros(ts_us as u64),
+                planes: VideoPlanes::Cpu(out),
+            })
+        }
+        anodecs::ColorFormat::TiYuv420PackedSemiPlanar | anodecs::ColorFormat::Unknown(other) => {
+            Err(crate::error::MediaFailure::new(
+                crate::error::MediaFailureCode::UnsupportedOutputFormat,
+                format!("unsupported MediaCodec color-format: {other}"),
+            )
+            .backend("android")
+            .into())
+        }
     }
 }
 
@@ -396,9 +488,19 @@ fn decode_loop(
             }
         }
 
-        // Service the codec: submit pending packets, drain finished frames
-        if let Ok(submitted) = submit_pending(&mut codec, &mut pending, &queue) {
-            in_flight = in_flight.saturating_add(submitted as u32);
+        // Service the codec: submit pending packets, drain finished frames.
+        // submit_pending() removes packets from `pending` as it submits them,
+        // so a submission error must surface to the output instead of being ignored.
+        match submit_pending(&mut codec, &mut pending, &queue) {
+            Ok(submitted) => {
+                in_flight = in_flight.saturating_add(submitted as u32);
+            }
+            Err(error) => {
+                pending.clear();
+                queue.store(0, Ordering::Relaxed);
+                let _ = frame_tx.send(Err(error));
+                return;
+            }
         }
         let produced = drain_output(&mut codec, &frame_tx);
         in_flight = in_flight.saturating_sub(produced as u32);
@@ -435,9 +537,16 @@ fn handle_flush(
         if pending.is_empty() {
             break;
         }
-        if let Ok(submitted) = submit_pending(codec, pending, queue) {
-            *in_flight = in_flight.saturating_add(submitted as u32);
-        }
+        let submitted = match submit_pending(codec, pending, queue) {
+            Ok(submitted) => submitted,
+            Err(error) => {
+                pending.clear();
+                queue.store(0, Ordering::Relaxed);
+                *in_flight = 0;
+                return Err(error);
+            }
+        };
+        *in_flight = in_flight.saturating_add(submitted as u32);
         let produced = drain_output(codec, frame_tx);
         *in_flight = in_flight.saturating_sub(produced as u32);
         if !pending.is_empty() {
@@ -471,26 +580,39 @@ fn submit_pending(
 ) -> Result<usize, Error> {
     let mut count = 0usize;
     while let Some(pkt) = pending.pop_front() {
-        if let Ok(buf) = codec.dequeue_input(0) {
-            let mut buf: anodecs::CodecInputBuffer = buf;
-            let (ptr, cap): (*mut u8, usize) = buf.buffer();
-            if pkt.payload.len() > cap {
+        match codec.dequeue_input(0) {
+            Ok(buf) => {
+                let mut buf: anodecs::CodecInputBuffer = buf;
+                let (ptr, cap): (*mut u8, usize) = buf.buffer();
+                if pkt.payload.len() > cap {
+                    // Hand the slot back to the codec instead of leaking it,
+                    // then surface the failure: the packet is intentionally
+                    // NOT requeued so the decode thread cannot spin forever
+                    // on a packet that will never fit.
+                    buf.cancel();
+                    return Err(Error::Platform(format!(
+                        "video packet too large: {} > {}",
+                        pkt.payload.len(),
+                        cap
+                    )));
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(pkt.payload.as_ptr(), ptr, pkt.payload.len());
+                }
+                buf.set_write_size(pkt.payload.len());
+                buf.set_time(pkt.timestamp.as_micros() as u64);
+                count += 1;
+                queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(DequeueInputError::TryAgainLater) => {
+                pending.push_front(pkt);
+                break;
+            }
+            Err(DequeueInputError::CodecError(status)) => {
                 return Err(Error::Platform(format!(
-                    "video packet too large: {} > {}",
-                    pkt.payload.len(),
-                    cap
+                    "video input unavailable (terminal): {status:?}"
                 )));
             }
-            unsafe {
-                std::ptr::copy_nonoverlapping(pkt.payload.as_ptr(), ptr, pkt.payload.len());
-            }
-            buf.set_write_size(pkt.payload.len());
-            buf.set_time(pkt.timestamp.as_micros() as u64);
-            count += 1;
-            queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            pending.push_front(pkt);
-            break;
         }
     }
     Ok(count)

@@ -170,6 +170,22 @@ mod tests {
     }
 
     #[test]
+    fn description_format_defaults_to_none() {
+        let cfg = VideoDecoderConfig::default();
+        assert!(cfg.description.is_none());
+        assert!(cfg.description_format.is_none());
+    }
+
+    #[test]
+    fn description_format_is_explicit() {
+        let cfg = VideoDecoderConfig {
+            description_format: Some(VideoDescriptionFormat::AvcC),
+            ..VideoDecoderConfig::default()
+        };
+        assert_eq!(cfg.description_format, Some(VideoDescriptionFormat::AvcC));
+    }
+
+    #[test]
     fn h264_level_rewrites_suffix() {
         let strings = VideoCodecId::H264 {
             profile: None,
@@ -244,11 +260,22 @@ pub enum VideoOutputMode {
     HardwareOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoDescriptionFormat {
+    AnnexB,
+    AvcC,
+    HvcC,
+    Av1C,
+    Av1SequenceHeaderObu,
+    CodecPrivate,
+}
+
 #[derive(Debug, Clone)]
 pub struct VideoDecoderConfig {
     pub codec: VideoCodecId,
     pub resolution: Option<Dimensions>,
     pub description: Option<Bytes>,
+    pub description_format: Option<VideoDescriptionFormat>,
     pub hardware_acceleration: Option<bool>,
     pub output_mode: VideoOutputMode,
 }
@@ -262,6 +289,7 @@ impl Default for VideoDecoderConfig {
             },
             resolution: None,
             description: None,
+            description_format: None,
             hardware_acceleration: Some(true),
             output_mode: VideoOutputMode::PreferHardware,
         }
