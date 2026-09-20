@@ -405,12 +405,17 @@ fn decode_loop(
         }
         let produced = drain_output(&mut codec, &frame_tx);
         in_flight = in_flight.saturating_sub(produced as u32);
-        trace!(
-            "decode_loop: pending={} in_flight={} produced={}",
-            pending.len(),
-            in_flight,
-            produced
-        );
+        // Rate-limit: log every 120 iterations (~every few seconds when idle)
+        // to avoid spamming logcat while still showing liveness.
+        static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 120 == 0 {
+            debug!(
+                "decode_loop: pending={} in_flight={} produced={}",
+                pending.len(),
+                in_flight,
+                produced
+            );
+        }
 
         // Brief sleep when work is in-flight but nothing progressed
         if pending.is_empty() && in_flight > 0 {
