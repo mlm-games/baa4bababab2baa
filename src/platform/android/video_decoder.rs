@@ -449,6 +449,14 @@ fn decode_loop(
             }
         }
 
+        // Service the codec: drain finished frames BEFORE submitting more
+        // input. MediaCodec stalls output when all of its input buffers are
+        // queued but none released (observed: 121 in-flight, zero output,
+        // zero error on all-IDR streams). Draining first keeps at least one
+        // input slot free, which is what lets the codec emit.
+        let produced = drain_output(&mut codec, &frame_tx);
+        in_flight = in_flight.saturating_sub(produced as u32);
+
         // Service the codec: submit pending packets, drain finished frames.
         // submit_pending() removes packets from `pending` as it submits them,
         // so a submission error must surface to the output instead of being ignored.
