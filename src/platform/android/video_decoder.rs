@@ -271,7 +271,16 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
             crop_left: crop_left as usize,
             crop_top: crop_top as usize,
         },
-    )?;
+    )
+    .map_err(|e| {
+        // Surface the failing geometry: stride/slice vs visible/coded sizes
+        // is the usual suspect when MediaCodec reports odd layouts.
+        warn!(
+            "output_to_frame repack failed: {e:?} (vis={vis_w}x{vis_h} coded={fmt_w}x{fmt_h} stride={stride} slice_h={slice_h} raw_len={} layout={layout:?})",
+            raw.len()
+        );
+        e
+    })?;
     Ok(VideoFrame {
         dimensions: Dimensions::new(vis_w, vis_h),
         format,
