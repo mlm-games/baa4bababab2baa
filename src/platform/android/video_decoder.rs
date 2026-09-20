@@ -333,11 +333,9 @@ fn drain_output(
             Err(DequeueOutputError::TryAgainLater) => {
                 static DRAIN_EMPTY: std::sync::atomic::AtomicU64 =
                     std::sync::atomic::AtomicU64::new(0);
-                if DRAIN_EMPTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 600 == 0 {
-                    info!(
-                        "drain_output: TryAgainLater (empty polls={})",
-                        DRAIN_EMPTY.load(std::sync::atomic::Ordering::Relaxed)
-                    );
+                let n = DRAIN_EMPTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n % 600 == 0 {
+                    info!("drain_output: TryAgainLater (empty polls={n})");
                 }
                 break;
             }
@@ -544,6 +542,16 @@ fn submit_pending(
                 }
                 buf.set_write_size(pkt.payload.len());
                 buf.set_time(pkt.timestamp.as_micros() as u64);
+                static SUBMITTED: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let n = SUBMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 5 {
+                    info!(
+                        "submit_pending: pkt#{n} bytes={} ts_us={}",
+                        pkt.payload.len(),
+                        pkt.timestamp.as_micros()
+                    );
+                }
                 count += 1;
                 queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
