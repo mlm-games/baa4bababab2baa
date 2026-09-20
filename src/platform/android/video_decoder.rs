@@ -542,6 +542,13 @@ fn submit_pending(
                 }
                 buf.set_write_size(pkt.payload.len());
                 buf.set_time(pkt.timestamp.as_micros() as u64);
+                // MediaCodec needs BUFFER_FLAG_KEY_FRAME on sync samples;
+                // without it the decoder may hold output waiting for a
+                // reference it never recognizes (all-IDR streams stall with
+                // zero output and zero error, exactly as observed).
+                if pkt.keyframe {
+                    buf.set_flags(anodecs::BufferFlag::KeyFrame as u32);
+                }
                 static SUBMITTED: std::sync::atomic::AtomicU64 =
                     std::sync::atomic::AtomicU64::new(0);
                 let n = SUBMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
