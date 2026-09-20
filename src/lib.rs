@@ -3,6 +3,7 @@ pub mod host;
 pub mod platform;
 pub mod traits;
 pub mod types;
+pub(crate) mod util;
 
 pub use error::{Error, MediaFailure, MediaFailureCode};
 pub use host::{Host, HostId, default_host, host_from_id};

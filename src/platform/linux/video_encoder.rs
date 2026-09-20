@@ -179,6 +179,10 @@ pub fn create(
     if !matches!(config.codec, VideoCodecId::H264 { .. }) {
         return Err(Error::Unsupported);
     }
+    crate::util::validate::video_dims_even(
+        config.dimensions.width,
+        config.dimensions.height,
+    )?;
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (pkt_tx, pkt_rx) = mpsc::unbounded_channel();

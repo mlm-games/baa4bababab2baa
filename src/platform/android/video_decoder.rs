@@ -11,9 +11,10 @@ use crate::{
     error::Error,
     traits::{VideoDecoderInput, VideoDecoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, PixelFormat, VideoDecoderConfig, VideoFrame,
-        VideoOutputMode, VideoPlanes,
+        Dimensions, EncodedVideoPacket, VideoDecoderConfig, VideoFrame, VideoOutputMode,
+        VideoPlanes,
     },
+    util::repack,
 };
 
 pub struct AndroidVideoDecoderInput {
@@ -199,29 +200,45 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
     let ts_us = out_buf.info().presentation_time_us;
 
     // Read the actual display size (crop rect overrides width/height for visible region)
-    let crop_left = fmt.get_i32("crop-left").unwrap_or(0) as u32;
-    let crop_top = fmt.get_i32("crop-top").unwrap_or(0) as u32;
-    let crop_right = fmt.get_i32("crop-right").unwrap_or(0) as u32;
-    let crop_bottom = fmt.get_i32("crop-bottom").unwrap_or(0) as u32;
-    let fmt_w = fmt.get_i32("width").unwrap_or(0) as u32;
-    let fmt_h = fmt.get_i32("height").unwrap_or(0) as u32;
+    // Negative keys (unset/malformed) are treated as absent: wrapping to u32
+    // would otherwise produce a ~4-billion-pixel visible size.
+    let crop_left = fmt.get_i32("crop-left").unwrap_or(0).max(0) as u32;
+    let crop_top = fmt.get_i32("crop-top").unwrap_or(0).max(0) as u32;
+    let crop_right = fmt.get_i32("crop-right").unwrap_or(0).max(0) as u32;
+    let crop_bottom = fmt.get_i32("crop-bottom").unwrap_or(0).max(0) as u32;
+    let fmt_w = fmt.get_i32("width").unwrap_or(0).max(0) as u32;
+    let fmt_h = fmt.get_i32("height").unwrap_or(0).max(0) as u32;
 
-    // Crop rect is preferred; fall back to width/height
-    let (vis_w, vis_h) = if crop_right > 0 && crop_bottom > 0 {
-        (crop_right - crop_left + 1, crop_bottom - crop_top + 1)
-    } else {
-        (fmt_w, fmt_h)
-    };
+    let (vis_w, vis_h) = repack::resolve_visible(
+        crop_left,
+        crop_top,
+        crop_right,
+        crop_bottom,
+        fmt_w,
+        fmt_h,
+    )?;
 
-    // Stride and slice-height may be provided; fall back to width/height
-    let stride = fmt.get_i32("stride").unwrap_or(fmt_w as i32) as usize;
-    let slice_h = fmt.get_i32("slice-height").unwrap_or(fmt_h as i32) as usize;
+    // Per the MediaCodec docs slice-height may be advertised as 0, meaning
+    // "same as frame height OR height aligned up (usually pow2)" — there is
+    // no way to tell which. Prefer the visible height, then fall back to the
+    // coded height, so a 0/negative key never becomes stride 0 or a
+    // slice smaller than the visible picture.
+    let stride = fmt
+        .get_i32("stride")
+        .filter(|&v| v > 0)
+        .map(|v| v as usize)
+        .unwrap_or(fmt_w.max(1) as usize);
+    let slice_h = fmt
+        .get_i32("slice-height")
+        .filter(|&v| v >= vis_h as i32 && v > 0)
+        .map(|v| v as usize)
+        .unwrap_or((vis_h.max(1) as usize).max(fmt_h.max(1) as usize));
 
     // A missing color-format key historically defaulted to NV12. Report it
     // explicitly instead so callers can distinguish "known NV12" from
     // "decoder did not report a layout".
-    let color_format = match fmt.color_format() {
-        Some(cf) => cf,
+    let layout = match fmt.color_format() {
+        Some(cf) => repack::layout_from_color_format_raw(cf.raw()),
         None => {
             return Err(crate::error::MediaFailure::new(
                 crate::error::MediaFailureCode::UnsupportedOutputFormat,
@@ -231,153 +248,36 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
             .into());
         }
     };
-
-    let w = vis_w as usize;
-    let h = vis_h as usize;
-
-    match color_format {
-        anodecs::ColorFormat::Yuv420SemiPlanar
-        | anodecs::ColorFormat::Yuv420Flexible
-        | anodecs::ColorFormat::Yuv420PackedSemiPlanar
-        | anodecs::ColorFormat::QcomYuv420SemiPlanar => {
-            // COLOR_FormatYUV420SemiPlanar (NV12) or compatible vendor formats
-            let y_size = stride * slice_h;
-            let uv_h = h / 2;
-            let uv_crop_top = crop_top as usize / 2;
-            // Buffer has Y plane padded to slice_h then UV plane.
-            // Some decoders only fill visible chroma rows (uv_h), not all slice_h/2 rows,
-            // so check against visible chroma extent rather than full padded uv_size.
-            let expected = y_size + uv_h * stride;
-            if raw.len() < expected {
-                return Err(Error::Platform(format!(
-                    "NV12 buffer too small: {} < {}",
-                    raw.len(),
-                    expected
-                )));
-            }
-            // Repack: copy visible rows from stride-pitched buffers into tight rows
-            let mut out = vec![0u8; w * h * 3 / 2];
-            let (out_y, out_uv) = out.split_at_mut(w * h);
-            let crop_l = crop_left as usize;
-            // Y plane
-            for row in 0..h {
-                let src_start = (crop_top as usize + row) * stride + crop_l;
-                let dst_start = row * w;
-                out_y[dst_start..dst_start + w].copy_from_slice(&raw[src_start..src_start + w]);
-            }
-            // UV plane (interleaved)
-            for row in 0..uv_h {
-                let src_start = y_size + (uv_crop_top + row) * stride + crop_l;
-                let dst_start = row * w;
-                out_uv[dst_start..dst_start + w].copy_from_slice(&raw[src_start..src_start + w]);
-            }
-            Ok(VideoFrame {
-                dimensions: Dimensions::new(vis_w, vis_h),
-                format: PixelFormat::Nv12,
-                timestamp: std::time::Duration::from_micros(ts_us as u64),
-                planes: VideoPlanes::Cpu(out),
-            })
-        }
-        anodecs::ColorFormat::Yuv420Planar | anodecs::ColorFormat::Yuv420PackedPlanar => {
-            // COLOR_FormatYUV420Planar (I420) or compatible vendor formats
-            let y_size = stride * slice_h;
-            let uv_stride = stride / 2;
-            let uv_h = h / 2;
-            // U and V planes each have slice_h/2 rows in the standard layout,
-            // but some decoders only fill visible chroma rows (uv_h).
-            let chroma_rows_per_plane = uv_h;
-            let u_size = uv_stride * chroma_rows_per_plane;
-            let expected = y_size + 2 * u_size;
-            if raw.len() < expected {
-                return Err(Error::Platform(format!(
-                    "I420 buffer too small: {} < {}",
-                    raw.len(),
-                    expected
-                )));
-            }
-            let mut out = vec![0u8; w * h * 3 / 2];
-            let (out_y, out_uv) = out.split_at_mut(w * h);
-            let (out_u, out_v) = out_uv.split_at_mut(w * h / 4);
-            let crop_l = crop_left as usize;
-            let uv_crop_l = crop_l / 2;
-            let uv_crop_top = (crop_top / 2) as usize;
-            // Y plane
-            for row in 0..h {
-                let src_start = (crop_top as usize + row) * stride + crop_l;
-                let dst_start = row * w;
-                out_y[dst_start..dst_start + w].copy_from_slice(&raw[src_start..src_start + w]);
-            }
-            // U plane
-            for row in 0..uv_h {
-                let src_start = y_size + (uv_crop_top + row) * uv_stride + uv_crop_l;
-                let dst_start = row * (w / 2);
-                out_u[dst_start..dst_start + w / 2]
-                    .copy_from_slice(&raw[src_start..src_start + w / 2]);
-            }
-            // V plane
-            for row in 0..uv_h {
-                let src_start = y_size + u_size + (uv_crop_top + row) * uv_stride + uv_crop_l;
-                let dst_start = row * (w / 2);
-                out_v[dst_start..dst_start + w / 2]
-                    .copy_from_slice(&raw[src_start..src_start + w / 2]);
-            }
-            Ok(VideoFrame {
-                dimensions: Dimensions::new(vis_w, vis_h),
-                format: PixelFormat::Yuv420p,
-                timestamp: std::time::Duration::from_micros(ts_us as u64),
-                planes: VideoPlanes::Cpu(out),
-            })
-        }
-        anodecs::ColorFormat::YuvP010 => {
-            // 10-bit semi-planar: Y and interleaved UV are 16-bit
-            // little-endian words with the 10-bit sample in the high bits.
-            // Downconvert to 8-bit NV12 by keeping the high byte of each word
-            let y_size = stride * slice_h * 2;
-            let uv_h = h / 2;
-            let uv_crop_top = crop_top as usize / 2;
-            let expected = y_size + uv_h * stride * 2;
-            if raw.len() < expected {
-                return Err(Error::Platform(format!(
-                    "P010 buffer too small: {} < {}",
-                    raw.len(),
-                    expected
-                )));
-            }
-            let mut out = vec![0u8; w * h * 3 / 2];
-            let (out_y, out_uv) = out.split_at_mut(w * h);
-            let crop_l = crop_left as usize;
-            for row in 0..h {
-                let src_row = (crop_top as usize + row) * stride * 2 + crop_l * 2;
-                let dst_start = row * w;
-                for col in 0..w {
-                    out_y[dst_start + col] = raw[src_row + col * 2 + 1];
-                }
-            }
-            for row in 0..uv_h {
-                let src_row = y_size + (uv_crop_top + row) * stride * 2 + crop_l * 2;
-                let dst_start = row * w;
-                for col in 0..w {
-                    out_uv[dst_start + col] = raw[src_row + col * 2 + 1];
-                }
-            }
-            Ok(VideoFrame {
-                dimensions: Dimensions::new(vis_w, vis_h),
-                format: PixelFormat::Nv12,
-                timestamp: std::time::Duration::from_micros(ts_us as u64),
-                planes: VideoPlanes::Cpu(out),
-            })
-        }
-        anodecs::ColorFormat::TiYuv420PackedSemiPlanar
-        | anodecs::ColorFormat::Surface
-        | anodecs::ColorFormat::Unknown(_) => {
-            Err(crate::error::MediaFailure::new(
-                crate::error::MediaFailureCode::UnsupportedOutputFormat,
-                format!("unsupported MediaCodec color-format: {color_format:?}"),
-            )
-            .backend("android")
-            .into())
-        }
+    if layout == repack::ColorLayout::Unsupported {
+        return Err(crate::error::MediaFailure::new(
+            crate::error::MediaFailureCode::UnsupportedOutputFormat,
+            format!(
+                "unsupported MediaCodec color-format: {:?}",
+                fmt.color_format()
+            ),
+        )
+        .backend("android")
+        .into());
     }
+
+    let (format, data) = repack::repack(
+        raw,
+        layout,
+        repack::Geometry {
+            vis_w,
+            vis_h,
+            stride,
+            slice_h,
+            crop_left: crop_left as usize,
+            crop_top: crop_top as usize,
+        },
+    )?;
+    Ok(VideoFrame {
+        dimensions: Dimensions::new(vis_w, vis_h),
+        format,
+        timestamp: std::time::Duration::from_micros(ts_us as u64),
+        planes: VideoPlanes::Cpu(data),
+    })
 }
 
 fn drain_output(

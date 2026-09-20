@@ -194,6 +194,10 @@ impl VideoEncoderOutput for WasmVideoEncoderOutput {
 pub fn create(
     config: VideoEncoderConfig,
 ) -> Result<(WasmVideoEncoderInput, WasmVideoEncoderOutput), Error> {
+    crate::util::validate::video_dims(
+        config.dimensions.width,
+        config.dimensions.height,
+    )?;
     let wc_cfg = to_wc_config(&config);
     let (enc, encoded) = wc_cfg
         .init()

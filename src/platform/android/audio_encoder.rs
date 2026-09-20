@@ -9,6 +9,7 @@ use crate::{
     error::Error,
     traits::{AudioEncoderInput, AudioEncoderOutput},
     types::{AudioDecoderConfig, AudioEncoderConfig, AudioFrame, EncodedAudioPacket},
+    util::validate as v,
 };
 
 pub struct AndroidAudioEncoderInput {
@@ -71,12 +72,7 @@ impl Drop for AndroidAudioEncoderInput {
 pub fn create(
     config: AudioEncoderConfig,
 ) -> Result<(AndroidAudioEncoderInput, AndroidAudioEncoderOutput), Error> {
-    if config.channels == 0 {
-        return Err(Error::InvalidConfig("audio channels must be non-zero".into()));
-    }
-    if config.sample_rate == 0 {
-        return Err(Error::InvalidConfig("audio sample rate must be non-zero".into()));
-    }
+    v::audio_encoder_config(config.channels, config.sample_rate)?;
     let mut format =
         MediaFormat::new().map_err(|_| Error::Platform("Failed to create MediaFormat".into()))?;
     let _ = format.set_string("mime", config.codec.to_mime());

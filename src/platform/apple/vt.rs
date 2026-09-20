@@ -506,9 +506,7 @@ pub fn create_encoder(
 ) -> Result<(AppleVideoEncoderInput, AppleVideoEncoderOutput), Error> {
     let (factory, codec_id) = encoder_factory(&config.codec)?;
 
-    if config.dimensions.width == 0 || config.dimensions.height == 0 {
-        return Err(Error::InvalidConfig("dimensions must be non-zero".into()));
-    }
+    crate::util::validate::video_dims(config.dimensions.width, config.dimensions.height)?;
 
     let mut params = CodecParameters::video(CodecId::new(codec_id));
     params.width = Some(config.dimensions.width);

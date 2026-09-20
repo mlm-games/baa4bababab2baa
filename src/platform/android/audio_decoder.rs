@@ -11,6 +11,7 @@ use crate::{
     error::Error,
     traits::{AudioDecoderInput, AudioDecoderOutput},
     types::{AudioDecoderConfig, AudioFrame, EncodedAudioPacket, SampleFormat},
+    util::validate as v,
 };
 
 pub struct AndroidAudioDecoderInput {
@@ -64,16 +65,7 @@ impl Drop for AndroidAudioDecoderInput {
 pub fn create(
     config: AudioDecoderConfig,
 ) -> Result<(AndroidAudioDecoderInput, AndroidAudioDecoderOutput), Error> {
-    if config.channel_count == 0 {
-        return Err(Error::InvalidConfig(
-            "audio channels must be non-zero".into(),
-        ));
-    }
-    if config.sample_rate == 0 {
-        return Err(Error::InvalidConfig(
-            "audio sample rate must be non-zero".into(),
-        ));
-    }
+    v::audio_decoder_config(config.channel_count, config.sample_rate)?;
     let mut format =
         MediaFormat::new().map_err(|_| Error::Platform("Failed to create MediaFormat".into()))?;
     let _ = format.set_string("mime", config.codec.to_mime());
