@@ -330,7 +330,17 @@ fn drain_output(
                     }
                 }
             }
-            Err(DequeueOutputError::TryAgainLater) => break,
+            Err(DequeueOutputError::TryAgainLater) => {
+                static DRAIN_EMPTY: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                if DRAIN_EMPTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 600 == 0 {
+                    info!(
+                        "drain_output: TryAgainLater (empty polls={})",
+                        DRAIN_EMPTY.load(std::sync::atomic::Ordering::Relaxed)
+                    );
+                }
+                break;
+            }
             Err(DequeueOutputError::OutputFormatChanged)
             | Err(DequeueOutputError::OutputBuffersChanged) => {
                 // format/buffers already refreshed by wrapper; continue polling
