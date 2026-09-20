@@ -172,6 +172,15 @@ pub fn create(
         .start()
         .map_err(|e| Error::Platform(format!("{e:?}")))?;
 
+    // Sanity: 220x162 Baseline should emit its first frame from a single
+    // IDR within milliseconds. If the codec accepts input but never produces
+    // output, the usual cause is a csd-0 / in-band parameter-set mismatch, so
+    // log the first submitted packet shape here for correlation.
+    info!(
+        "decoder started: mime={mime} output_mode={:?}",
+        config.output_mode
+    );
+
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd<EncodedVideoPacket>>();
     let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Result<VideoFrame, Error>>();
     let queue = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -553,10 +562,28 @@ fn submit_pending(
                     std::sync::atomic::AtomicU64::new(0);
                 let n = SUBMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n < 5 {
+                    // Peek first NALU type: Annex-B start code + header byte.
+                    // type 5 = IDR, 1 = non-IDR slice, 7/8 = SPS/PPS.
+                    let peek = if pkt.payload.len() >= 5
+                        && pkt.payload[0] == 0x00
+                        && pkt.payload[1] == 0x00
+                        && (pkt.payload[2] == 0x01
+                            || (pkt.payload[2] == 0x00 && pkt.payload[3] == 0x01))
+                    {
+                        let hb = if pkt.payload[2] == 0x01 {
+                            pkt.payload[3]
+                        } else {
+                            pkt.payload[4]
+                        };
+                        format!("annexb nal_type={}", hb & 0x1f)
+                    } else {
+                        format!("head={:02x?}", &pkt.payload[..pkt.payload.len().min(8)])
+                    };
                     info!(
-                        "submit_pending: pkt#{n} bytes={} ts_us={}",
+                        "submit_pending: pkt#{n} bytes={} ts_us={} keyframe={} {peek}",
                         pkt.payload.len(),
-                        pkt.timestamp.as_micros()
+                        pkt.timestamp.as_micros(),
+                        pkt.keyframe
                     );
                 }
                 count += 1;
