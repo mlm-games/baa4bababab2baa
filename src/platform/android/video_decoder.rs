@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use anodecs::{BufferFlag, DequeueInputError, DequeueOutputError, MediaCodec, MediaFormat};
-use log::info;
+use log::{debug, info, trace, warn};
 use tokio::sync::{mpsc, oneshot};
 
 use super::cmd::{self, Cmd};
@@ -305,7 +305,7 @@ fn drain_output(
                         count += 1;
                     }
                     Err(e) => {
-                        info!("decoder output_to_frame error: {e:?}");
+                        log::warn!("decoder output_to_frame error: {e:?}");
                         let _ = frame_tx.send(Err(e));
                         return count;
                     }
@@ -317,7 +317,7 @@ fn drain_output(
                 // format/buffers already refreshed by wrapper; continue polling
             }
             Err(DequeueOutputError::CodecError(e)) => {
-                info!("decoder drain: CodecError {e:?}");
+                warn!("decoder drain: CodecError {e:?}");
                 let _ = frame_tx.send(Err(Error::Platform(format!("codec error: {e:?}"))));
                 return count;
             }
@@ -405,6 +405,12 @@ fn decode_loop(
         }
         let produced = drain_output(&mut codec, &frame_tx);
         in_flight = in_flight.saturating_sub(produced as u32);
+        trace!(
+            "decode_loop: pending={} in_flight={} produced={}",
+            pending.len(),
+            in_flight,
+            produced
+        );
 
         // Brief sleep when work is in-flight but nothing progressed
         if pending.is_empty() && in_flight > 0 {
