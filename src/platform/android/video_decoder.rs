@@ -308,6 +308,16 @@ fn drain_output(
                 }
                 match output_to_frame(&out_buf) {
                     Ok(frame) => {
+                        static OUT_OK: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        if OUT_OK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+                            info!(
+                                "drain_output: frame {} ts={} fmt={:?}",
+                                OUT_OK.load(std::sync::atomic::Ordering::Relaxed),
+                                frame.timestamp.as_micros(),
+                                frame.format
+                            );
+                        }
                         if frame_tx.send(Ok(frame)).is_err() {
                             return count;
                         }
