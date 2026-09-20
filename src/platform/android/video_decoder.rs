@@ -407,9 +407,11 @@ fn decode_loop(
         in_flight = in_flight.saturating_sub(produced as u32);
         // Rate-limit: log every 120 iterations (~every few seconds when idle)
         // to avoid spamming logcat while still showing liveness.
+        // NOTE(log-verify): heartbeat intentionally info! until the Android
+        // HW-stall investigation closes; then demote back to debug!.
         static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         if TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 120 == 0 {
-            debug!(
+            info!(
                 "decode_loop: pending={} in_flight={} produced={}",
                 pending.len(),
                 in_flight,
