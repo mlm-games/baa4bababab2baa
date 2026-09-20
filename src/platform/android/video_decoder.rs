@@ -103,8 +103,20 @@ pub fn create(
     let _ = format.set_string("mime", config.codec.to_mime());
 
     if let Some(res) = config.resolution {
-        let _ = format.set_i32("width", res.width as i32);
-        let _ = format.set_i32("height", res.height as i32);
+        // Report the CODED (macroblock-aligned) size to MediaCodec, not the
+        // visible size: the SPS crop rectangle derives visible dims from coded
+        // dims, and configuring visible dims makes the codec expect a crop it
+        // never gets. Observed: 220x162-in-224x176 streams stall with zero
+        // output when configured as 220x162.
+        let (cw, ch) = (res.width.div_ceil(16) * 16, res.height.div_ceil(16) * 16);
+        if (cw, ch) != (res.width, res.height) {
+            info!(
+                "decoder resolution: aligning {}x{} to coded {}x{} for MediaCodec",
+                res.width, res.height, cw, ch
+            );
+        }
+        let _ = format.set_i32("width", cw as i32);
+        let _ = format.set_i32("height", ch as i32);
     }
 
     if let Some(desc) = &config.description {
@@ -269,6 +281,18 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
         .into());
     }
 
+    // Crop-rect sanity: MediaCodec advertises coded dims + inclusive crop.
+    // A crop smaller than coded dims is normal (odd sizes like 220x162 in a
+    // 224x176 frame); a crop LARGER than coded dims is driver garbage and
+    // would make repack read out of bounds. Clamp defensively and log.
+    let (vis_w, vis_h) = if vis_w > fmt_w || vis_h > fmt_h {
+        log::warn!(
+            "crop rect {vis_w}x{vis_h} exceeds coded {fmt_w}x{fmt_h}; clamping to coded size"
+        );
+        (fmt_w.min(vis_w).max(1), fmt_h.min(vis_h).max(1))
+    } else {
+        (vis_w, vis_h)
+    };
     let (format, data) = repack::repack(
         raw,
         layout,
@@ -277,8 +301,8 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
             vis_h,
             stride,
             slice_h,
-            crop_left: crop_left as usize,
-            crop_top: crop_top as usize,
+            crop_left: crop_left.min(vis_w.saturating_sub(1)) as usize,
+            crop_top: crop_top.min(vis_h.saturating_sub(1)) as usize,
         },
     )
     .map_err(|e| {
