@@ -149,17 +149,25 @@ pub fn create(
                     desc.len()
                 );
             }
-            // keep the previous lenient behavior so existing
-            // callers that pass avcC/hvcC without a format keep working.
+            // Undeclared format: sniff the payload. Annex-B start codes
+            // are NOT valid csd-0 — MediaCodec expects the raw avcC record
+            // here. Feeding SPS/PPS Annex-B bytes as csd-0 silently breaks
+            // the decoder (accepts all input, emits zero output, zero error).
+            // Skip csd-0 in that case and rely on in-band parameter sets.
             None => {
                 let csd_first: Vec<u8> = desc.iter().take(8).copied().collect();
+                let looks_annexb = desc.len() >= 4
+                    && (desc[..4] == [0x00, 0x00, 0x00, 0x01]
+                        || desc[..3] == [0x00, 0x00, 0x01]);
                 info!(
-                    "decoder csd-0: {} bytes (format undeclared), first={:02x?}, starts_with_annexb={}",
+                    "decoder csd-0: {} bytes (format undeclared), first={:02x?}, looks_annexb={}",
                     desc.len(),
                     csd_first,
-                    desc.len() >= 4 && (desc[..4] == [0x00, 0x00, 0x00, 0x01])
+                    looks_annexb
                 );
-                let _ = format.set_buffer("csd-0", desc);
+                if !looks_annexb {
+                    let _ = format.set_buffer("csd-0", desc);
+                }
             }
         }
     }
