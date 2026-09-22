@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use anodecs::{BufferFlag, DequeueInputError, DequeueOutputError, MediaCodec, MediaFormat};
-use log::{debug, info, trace, warn};
+use log::{debug, trace, warn};
 use tokio::sync::{mpsc, oneshot};
 
 use super::cmd::{self, Cmd};
@@ -110,7 +110,7 @@ pub fn create(
         // output when configured as 220x162.
         let (cw, ch) = (res.width.div_ceil(16) * 16, res.height.div_ceil(16) * 16);
         if (cw, ch) != (res.width, res.height) {
-            info!(
+            debug!(
                 "decoder resolution: aligning {}x{} to coded {}x{} for MediaCodec",
                 res.width, res.height, cw, ch
             );
@@ -127,7 +127,7 @@ pub fn create(
                 | crate::types::VideoDescriptionFormat::Av1C
                 | crate::types::VideoDescriptionFormat::CodecPrivate,
             ) => {
-                info!(
+                debug!(
                     "decoder csd-0: {} bytes, format={:?}",
                     desc.len(),
                     config.description_format
@@ -143,7 +143,7 @@ pub fn create(
                 crate::types::VideoDescriptionFormat::AnnexB
                 | crate::types::VideoDescriptionFormat::Av1SequenceHeaderObu,
             ) => {
-                info!(
+                debug!(
                     "decoder csd-0: skipping {:?} config ({} bytes); relying on in-band parameter sets",
                     config.description_format,
                     desc.len()
@@ -159,7 +159,7 @@ pub fn create(
                 let looks_annexb = desc.len() >= 4
                     && (desc[..4] == [0x00, 0x00, 0x00, 0x01]
                         || desc[..3] == [0x00, 0x00, 0x01]);
-                info!(
+                debug!(
                     "decoder csd-0: {} bytes (format undeclared), first={:02x?}, looks_annexb={}",
                     desc.len(),
                     csd_first,
@@ -172,7 +172,7 @@ pub fn create(
         }
     }
 
-    info!(
+    debug!(
         "decoder format: mime={}, {}x{}, csd-0 present={}",
         config.codec.to_mime(),
         config.resolution.map(|r| r.width).unwrap_or(0),
@@ -196,7 +196,7 @@ pub fn create(
     // IDR within milliseconds. If the codec accepts input but never produces
     // output, the usual cause is a csd-0 / in-band parameter-set mismatch, so
     // log the first submitted packet shape here for correlation.
-    info!(
+    debug!(
         "decoder started: mime={mime} output_mode={:?}",
         config.output_mode
     );
@@ -352,7 +352,7 @@ fn drain_output(
                         static OUT_OK: std::sync::atomic::AtomicU64 =
                             std::sync::atomic::AtomicU64::new(0);
                         if OUT_OK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
-                            info!(
+                            debug!(
                                 "drain_output: frame {} ts={} fmt={:?}",
                                 OUT_OK.load(std::sync::atomic::Ordering::Relaxed),
                                 frame.timestamp.as_micros(),
@@ -365,19 +365,14 @@ fn drain_output(
                         count += 1;
                     }
                     Err(e) => {
-                        log::warn!("decoder output_to_frame error: {e:?}");
+                        warn!("decoder output_to_frame error: {e:?}");
                         let _ = frame_tx.send(Err(e));
                         return count;
                     }
                 }
             }
             Err(DequeueOutputError::TryAgainLater) => {
-                static DRAIN_EMPTY: std::sync::atomic::AtomicU64 =
-                    std::sync::atomic::AtomicU64::new(0);
-                let n = DRAIN_EMPTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n % 600 == 0 {
-                    info!("drain_output: TryAgainLater (empty polls={n})");
-                }
+                trace!("drain_output: empty");
                 break;
             }
             Err(DequeueOutputError::OutputFormatChanged)
@@ -405,7 +400,7 @@ fn decode_loop(
         std::collections::VecDeque::new();
     let mut in_flight: u32 = 0;
 
-    info!("decode_loop started");
+    debug!("decode_loop started");
 
     loop {
         // When no work in the pipeline, block for the next command.
@@ -421,7 +416,7 @@ fn decode_loop(
                     let _ = done.send(res);
                 }
                 Some(Cmd::Close) | None => {
-                    info!("decode_loop: close");
+                    debug!("decode_loop: close");
                     drain_output(&mut codec, &frame_tx);
                     queue.store(0, Ordering::Relaxed);
                     clean_exit.store(true, Ordering::Release);
@@ -446,7 +441,7 @@ fn decode_loop(
                         let _ = done.send(res);
                     }
                     Ok(Cmd::Close) | Err(mpsc::error::TryRecvError::Disconnected) => {
-                        info!("decode_loop: close (non-blocking)");
+                        debug!("decode_loop: close (non-blocking)");
                         drain_output(&mut codec, &frame_tx);
                         queue.store(0, Ordering::Relaxed);
                         clean_exit.store(true, Ordering::Release);
@@ -481,19 +476,12 @@ fn decode_loop(
         }
         let produced = drain_output(&mut codec, &frame_tx);
         in_flight = in_flight.saturating_sub(produced as u32);
-        // Rate-limit: log every 120 iterations (~every few seconds when idle)
-        // to avoid spamming logcat while still showing liveness.
-        // NOTE(log-verify): heartbeat intentionally info! until the Android
-        // HW-stall investigation closes; then demote back to debug!.
-        static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        if TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 120 == 0 {
-            info!(
-                "decode_loop: pending={} in_flight={} produced={}",
-                pending.len(),
-                in_flight,
-                produced
-            );
-        }
+        trace!(
+            "decode_loop: pending={} in_flight={} produced={}",
+            pending.len(),
+            in_flight,
+            produced
+        );
 
         // Brief sleep when work is in-flight but nothing progressed
         if pending.is_empty() && in_flight > 0 {
@@ -502,7 +490,7 @@ fn decode_loop(
 
         // Exit cleanly when sender is dropped and all work is done
         if cmd_rx.is_closed() && pending.is_empty() && in_flight == 0 {
-            info!("decode_loop: closed+empty");
+            debug!("decode_loop: closed+empty");
             drain_output(&mut codec, &frame_tx);
             queue.store(0, Ordering::Relaxed);
             clean_exit.store(true, Ordering::Release);
@@ -518,7 +506,7 @@ fn handle_flush(
     queue: &std::sync::Arc<std::sync::atomic::AtomicU32>,
     in_flight: &mut u32,
 ) -> Result<(), Error> {
-    info!("decode_loop: flush start, pending={}", pending.len());
+    debug!("decode_loop: flush start, pending={}", pending.len());
 
     let produced = drain_output(codec, frame_tx);
     *in_flight = in_flight.saturating_sub(produced as u32);
@@ -547,7 +535,7 @@ fn handle_flush(
         return Err(Error::Platform("flush timed out submitting pending".into()));
     }
 
-    info!("decode_loop: flush sending EOS");
+    debug!("decode_loop: flush sending EOS");
     cmd::send_eos(codec)?;
     cmd::drain_until_eos(codec, |out| {
         let frame = output_to_frame(&out)?;
@@ -559,7 +547,7 @@ fn handle_flush(
         .map_err(|e| Error::Platform(format!("{e:?}")))?;
 
     *in_flight = 0;
-    info!("decode_loop: flush done");
+    debug!("decode_loop: flush done");
     Ok(())
 }
 
@@ -598,34 +586,12 @@ fn submit_pending(
                 if pkt.keyframe {
                     buf.set_flags(anodecs::BufferFlag::KeyFrame as u32);
                 }
-                static SUBMITTED: std::sync::atomic::AtomicU64 =
-                    std::sync::atomic::AtomicU64::new(0);
-                let n = SUBMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n < 5 {
-                    // Peek first NALU type: Annex-B start code + header byte.
-                    // type 5 = IDR, 1 = non-IDR slice, 7/8 = SPS/PPS.
-                    let peek = if pkt.payload.len() >= 5
-                        && pkt.payload[0] == 0x00
-                        && pkt.payload[1] == 0x00
-                        && (pkt.payload[2] == 0x01
-                            || (pkt.payload[2] == 0x00 && pkt.payload[3] == 0x01))
-                    {
-                        let hb = if pkt.payload[2] == 0x01 {
-                            pkt.payload[3]
-                        } else {
-                            pkt.payload[4]
-                        };
-                        format!("annexb nal_type={}", hb & 0x1f)
-                    } else {
-                        format!("head={:02x?}", &pkt.payload[..pkt.payload.len().min(8)])
-                    };
-                    info!(
-                        "submit_pending: pkt#{n} bytes={} ts_us={} keyframe={} {peek}",
-                        pkt.payload.len(),
-                        pkt.timestamp.as_micros(),
-                        pkt.keyframe
-                    );
-                }
+                trace!(
+                    "submit pkt bytes={} ts_us={} keyframe={}",
+                    pkt.payload.len(),
+                    pkt.timestamp.as_micros(),
+                    pkt.keyframe
+                );
                 count += 1;
                 queue.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
