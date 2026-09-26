@@ -172,12 +172,13 @@ pub fn create(
         }
     }
 
-    debug!(
-        "decoder format: mime={}, {}x{}, csd-0 present={}",
+    log::warn!(
+        "decoder format: mime={}, {}x{}, csd-0 present={} csd_len={}",
         config.codec.to_mime(),
         config.resolution.map(|r| r.width).unwrap_or(0),
         config.resolution.map(|r| r.height).unwrap_or(0),
-        config.description.is_some()
+        config.description.is_some(),
+        config.description.as_ref().map(|d| d.len()).unwrap_or(0)
     );
 
     let mime = config.codec.to_mime().to_string();
@@ -192,14 +193,7 @@ pub fn create(
         .start()
         .map_err(|e| Error::Platform(format!("{e:?}")))?;
 
-    // Sanity: 220x162 Baseline should emit its first frame from a single
-    // IDR within milliseconds. If the codec accepts input but never produces
-    // output, the usual cause is a csd-0 / in-band parameter-set mismatch, so
-    // log the first submitted packet shape here for correlation.
-    debug!(
-        "decoder started: mime={mime} output_mode={:?}",
-        config.output_mode
-    );
+    log::warn!("decoder started: mime={mime} output_mode={:?}", config.output_mode);
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd<EncodedVideoPacket>>();
     let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Result<VideoFrame, Error>>();
@@ -352,11 +346,13 @@ fn drain_output(
                         static OUT_OK: std::sync::atomic::AtomicU64 =
                             std::sync::atomic::AtomicU64::new(0);
                         if OUT_OK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
-                            debug!(
-                                "drain_output: frame {} ts={} fmt={:?}",
+                            log::warn!(
+                                "drain_output: frame {} ts={} fmt={:?} {}x{}",
                                 OUT_OK.load(std::sync::atomic::Ordering::Relaxed),
                                 frame.timestamp.as_micros(),
-                                frame.format
+                                frame.format,
+                                frame.dimensions.width,
+                                frame.dimensions.height,
                             );
                         }
                         if frame_tx.send(Ok(frame)).is_err() {
@@ -380,7 +376,7 @@ fn drain_output(
                 // format/buffers already refreshed by wrapper; continue polling
             }
             Err(DequeueOutputError::CodecError(e)) => {
-                warn!("decoder drain: CodecError {e:?}");
+                log::warn!("decoder drain: CodecError {e:?} after {count} frames");
                 let _ = frame_tx.send(Err(Error::Platform(format!("codec error: {e:?}"))));
                 return count;
             }
@@ -468,6 +464,11 @@ fn decode_loop(
                 in_flight = in_flight.saturating_add(submitted as u32);
             }
             Err(error) => {
+                log::warn!(
+                    "decode_loop: submit error, aborting thread: {error:?} (pending={} in_flight={})",
+                    pending.len(),
+                    in_flight,
+                );
                 pending.clear();
                 queue.store(0, Ordering::Relaxed);
                 let _ = frame_tx.send(Err(error));
