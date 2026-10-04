@@ -7,9 +7,9 @@ pub use audio::{
 };
 pub use common::{Dimensions, PixelFormat, SampleFormat, Timestamp};
 pub use video::{
-    AvcBitstreamFormat, EncodedVideoPacket, HardwareBuffer, VideoCodecId, VideoColorSpace,
-    VideoDecoderConfig, VideoDescriptionFormat, VideoEncoderConfig, VideoFrame, VideoOutputMode,
-    VideoPlanes,
+    AvcBitstreamFormat, CICP_UNSPECIFIED, EncodedVideoPacket, HardwareBuffer, VideoCodecId,
+    VideoColorInfo, VideoColorSpace, VideoDecoderConfig, VideoDescriptionFormat,
+    VideoEncoderConfig, VideoFrame, VideoOutputMode, VideoPlanes,
 };
 #[cfg(all(target_os = "linux", feature = "linux"))]
 pub use video::{DmaBufFrame, DmaBufPlane};

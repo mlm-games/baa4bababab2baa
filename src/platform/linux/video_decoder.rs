@@ -11,7 +11,7 @@ use crate::{
     traits::{VideoDecoderInput, VideoDecoderOutput},
     types::{
         Dimensions, DmaBufFrame, DmaBufPlane, EncodedVideoPacket, HardwareBuffer, PixelFormat,
-        Timestamp, VideoDecoderConfig, VideoFrame, VideoOutputMode, VideoPlanes,
+        Timestamp, VideoColorInfo, VideoDecoderConfig, VideoFrame, VideoOutputMode, VideoPlanes,
         video::HardwareBufferInner,
     },
 };
@@ -45,6 +45,8 @@ pub struct CrosVideoDecoderInput {
 
 pub struct CrosVideoDecoderOutput {
     rx: mpsc::UnboundedReceiver<Result<VideoFrame, Error>>,
+    /// Echoed onto every frame handed back; see [`VideoDecoderConfig::color`].
+    color: Option<VideoColorInfo>,
     /// Set when the worker thread exits via a clean teardown path (`Close` /
     /// sender dropped). A `Disconnected` channel *without* this flag means the
     /// thread died unexpectedly (panic), which must surface as an error so
@@ -81,10 +83,20 @@ impl VideoDecoderInput for CrosVideoDecoderInput {
     }
 }
 
+impl CrosVideoDecoderOutput {
+    fn stamp(&self, frame: &mut VideoFrame) {
+        frame.color = self.color;
+    }
+}
+
 impl VideoDecoderOutput for CrosVideoDecoderOutput {
     async fn frame(&mut self) -> Result<Option<VideoFrame>, Error> {
         match self.rx.recv().await {
-            Some(r) => r.map(Some),
+            Some(Ok(mut frame)) => {
+                self.stamp(&mut frame);
+                Ok(Some(frame))
+            }
+            Some(Err(e)) => Err(e),
             // Clean shutdown reads as EOS; an unclean one is decoder death.
             None if self.clean_exit.load(Ordering::Acquire) => Ok(None),
             None => Err(Error::Dropped),
@@ -93,7 +105,10 @@ impl VideoDecoderOutput for CrosVideoDecoderOutput {
 
     fn try_frame(&mut self) -> Result<Option<VideoFrame>, Error> {
         match self.rx.try_recv() {
-            Ok(Ok(frame)) => Ok(Some(frame)),
+            Ok(Ok(mut frame)) => {
+                self.stamp(&mut frame);
+                Ok(Some(frame))
+            }
             Ok(Err(e)) => Err(e),
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
             Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -112,6 +127,7 @@ pub fn create(
 ) -> Result<(CrosVideoDecoderInput, CrosVideoDecoderOutput), Error> {
     let codec = config.codec.clone();
     let output_mode = config.output_mode;
+    let color = config.color;
     let fmt = codec_to_fmt(&codec).map_err(|e| Error::Platform(e))?;
 
     // Open VA display and validate codec support synchronously (for easier fallback)
@@ -145,6 +161,7 @@ pub fn create(
         CrosVideoDecoderInput { tx: cmd_tx, queue },
         CrosVideoDecoderOutput {
             rx: frame_rx,
+            color,
             clean_exit,
         },
     ))
@@ -577,6 +594,7 @@ fn gdma_to_hardware<F: CcVideoFrame + 'static>(
         },
         format: pixel,
         timestamp,
+        color: None,
         planes: VideoPlanes::Hardware(HardwareBuffer {
             inner: HardwareBufferInner::DmaBuf(DmaBufFrame {
                 fds,
@@ -805,6 +823,7 @@ fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(
         },
         format: PixelFormat::Yuv420p,
         timestamp,
+        color: None,
         planes: VideoPlanes::Cpu(data),
     })
 }
@@ -860,6 +879,7 @@ fn p010_frame_to_i010<F: CcVideoFrame>(
         },
         format: PixelFormat::Yuv420p,
         timestamp,
+        color: None,
         planes: VideoPlanes::Cpu(data),
     })
 }
@@ -906,6 +926,7 @@ fn nv12_frame_to_i420<F: CcVideoFrame>(
         },
         format: PixelFormat::Yuv420p,
         timestamp,
+        color: None,
         planes: VideoPlanes::Cpu(data),
     })
 }

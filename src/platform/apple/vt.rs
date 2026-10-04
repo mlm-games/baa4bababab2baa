@@ -25,8 +25,8 @@ use crate::{
     },
     types::{
         AudioDecoderConfig, AudioEncoderConfig, AudioFrame, Dimensions, EncodedAudioPacket,
-        EncodedVideoPacket, PixelFormat, VideoCodecId, VideoDecoderConfig, VideoEncoderConfig,
-        VideoFrame, VideoPlanes,
+        EncodedVideoPacket, PixelFormat, VideoCodecId, VideoColorInfo, VideoDecoderConfig,
+        VideoEncoderConfig, VideoFrame, VideoPlanes,
     },
 };
 
@@ -160,6 +160,8 @@ impl Drop for AppleVideoDecoderInput {
 
 pub struct AppleVideoDecoderOutput {
     rx: mpsc::UnboundedReceiver<Result<VideoFrame, Error>>,
+    /// Echoed onto every frame handed back; see [`VideoDecoderConfig::color`].
+    color: Option<VideoColorInfo>,
     /// Set when the decode thread exits via a clean teardown path (`Close` /
     /// sender dropped). A `Disconnected` channel *without* this flag means the
     /// thread died unexpectedly (panic), which must surface as an error so
@@ -190,10 +192,20 @@ impl VideoDecoderInput for AppleVideoDecoderInput {
     }
 }
 
+impl AppleVideoDecoderOutput {
+    fn stamp(&self, frame: &mut VideoFrame) {
+        frame.color = self.color;
+    }
+}
+
 impl VideoDecoderOutput for AppleVideoDecoderOutput {
     async fn frame(&mut self) -> Result<Option<VideoFrame>, Error> {
         match self.rx.recv().await {
-            Some(r) => r.map(Some),
+            Some(Ok(mut frame)) => {
+                self.stamp(&mut frame);
+                Ok(Some(frame))
+            }
+            Some(Err(e)) => Err(e),
             // Clean shutdown reads as EOS; an unclean one is decoder death.
             None if self.clean_exit.load(Ordering::Acquire) => Ok(None),
             None => Err(Error::Dropped),
@@ -202,7 +214,10 @@ impl VideoDecoderOutput for AppleVideoDecoderOutput {
 
     fn try_frame(&mut self) -> Result<Option<VideoFrame>, Error> {
         match self.rx.try_recv() {
-            Ok(Ok(frame)) => Ok(Some(frame)),
+            Ok(Ok(mut frame)) => {
+                self.stamp(&mut frame);
+                Ok(Some(frame))
+            }
             Ok(Err(e)) => Err(e),
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
             Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -256,6 +271,7 @@ pub fn create_decoder(
         AppleVideoDecoderInput { tx: cmd_tx, queue },
         AppleVideoDecoderOutput {
             rx: frame_rx,
+            color: config.color,
             clean_exit,
         },
     ))
@@ -327,6 +343,7 @@ fn convert_video_frame(
         dimensions: Dimensions::new(w as u32, h as u32),
         format: PixelFormat::Yuv420p,
         timestamp: Duration::from_micros(pts_us),
+        color: None,
         planes: VideoPlanes::Cpu(data),
     })
 }
@@ -540,6 +557,7 @@ pub fn create_encoder(
         description_format: None,
         hardware_acceleration: None,
         output_mode: crate::types::VideoOutputMode::Cpu,
+        color: None,
     };
 
     let width = config.dimensions.width;

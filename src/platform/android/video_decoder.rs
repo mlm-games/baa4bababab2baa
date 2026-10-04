@@ -11,8 +11,8 @@ use crate::{
     error::Error,
     traits::{VideoDecoderInput, VideoDecoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, VideoDecoderConfig, VideoFrame, VideoOutputMode,
-        VideoPlanes,
+        Dimensions, EncodedVideoPacket, VideoColorInfo, VideoDecoderConfig, VideoFrame,
+        VideoOutputMode, VideoPlanes,
     },
     util::repack,
 };
@@ -30,6 +30,8 @@ impl Drop for AndroidVideoDecoderInput {
 
 pub struct AndroidVideoDecoderOutput {
     rx: mpsc::UnboundedReceiver<Result<VideoFrame, Error>>,
+    /// Echoed onto every frame handed back; see [`VideoDecoderConfig::color`].
+    color: Option<VideoColorInfo>,
     /// Set when the decode thread exits via a clean teardown path (`Close` /
     /// sender dropped). A `Disconnected` channel *without* this flag means the
     /// thread died unexpectedly (panic), which must surface as an error so
@@ -62,10 +64,20 @@ impl VideoDecoderInput for AndroidVideoDecoderInput {
     }
 }
 
+impl AndroidVideoDecoderOutput {
+    fn stamp(&self, frame: &mut VideoFrame) {
+        frame.color = self.color;
+    }
+}
+
 impl VideoDecoderOutput for AndroidVideoDecoderOutput {
     async fn frame(&mut self) -> Result<Option<VideoFrame>, Error> {
         match self.rx.recv().await {
-            Some(result) => result.map(Some),
+            Some(Ok(mut frame)) => {
+                self.stamp(&mut frame);
+                Ok(Some(frame))
+            }
+            Some(Err(e)) => Err(e),
             // Clean shutdown reads as EOS; an unclean one is decoder death.
             None if self.clean_exit.load(Ordering::Acquire) => Ok(None),
             None => Err(Error::Dropped),
@@ -74,7 +86,10 @@ impl VideoDecoderOutput for AndroidVideoDecoderOutput {
 
     fn try_frame(&mut self) -> Result<Option<VideoFrame>, Error> {
         match self.rx.try_recv() {
-            Ok(Ok(frame)) => Ok(Some(frame)),
+            Ok(Ok(mut frame)) => {
+                self.stamp(&mut frame);
+                Ok(Some(frame))
+            }
             Ok(Err(e)) => Err(e),
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
             Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -210,6 +225,7 @@ pub fn create(
         AndroidVideoDecoderInput { tx: cmd_tx, queue },
         AndroidVideoDecoderOutput {
             rx: frame_rx,
+            color: config.color,
             clean_exit,
         },
     ))
@@ -320,6 +336,7 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
         dimensions: Dimensions::new(vis_w, vis_h),
         format,
         timestamp: std::time::Duration::from_micros(ts_us as u64),
+        color: None,
         planes: VideoPlanes::Cpu(data),
     })
 }

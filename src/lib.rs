@@ -13,9 +13,10 @@ pub use traits::{
 };
 pub use types::{
     AudioCodecId, AudioDecoderConfig, AudioEncoderConfig, AudioFrame, AvcBitstreamFormat,
-    Dimensions, EncodedAudioPacket, EncodedVideoPacket, HardwareBuffer, PixelFormat, SampleFormat,
-    Timestamp, VideoCodecId, VideoColorSpace, VideoDecoderConfig, VideoDescriptionFormat,
-    VideoEncoderConfig, VideoFrame, VideoOutputMode, VideoPlanes,
+    CICP_UNSPECIFIED, Dimensions, EncodedAudioPacket, EncodedVideoPacket, HardwareBuffer,
+    PixelFormat, SampleFormat, Timestamp, VideoCodecId, VideoColorInfo, VideoColorSpace,
+    VideoDecoderConfig, VideoDescriptionFormat, VideoEncoderConfig, VideoFrame, VideoOutputMode,
+    VideoPlanes,
 };
 #[cfg(all(target_os = "linux", feature = "linux"))]
 pub use types::{DmaBufFrame, DmaBufPlane};

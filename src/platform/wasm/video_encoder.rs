@@ -146,6 +146,9 @@ impl WasmVideoEncoderOutput {
                 description_format: None,
                 hardware_acceleration: wc_cfg.hardware_acceleration,
                 output_mode: VideoOutputMode::Cpu,
+                // The encoder does not signal colour into the bitstream, so
+                // there is nothing for a downstream decoder to recover here.
+                color: None,
             });
         }
         EncodedVideoPacket {

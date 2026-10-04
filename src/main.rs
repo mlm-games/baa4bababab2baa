@@ -14,6 +14,7 @@ fn main() {
         description_format: None,
         hardware_acceleration: None,
         output_mode: VideoOutputMode::Cpu,
+        color: None,
     };
 
     let enc_config = VideoEncoderConfig {

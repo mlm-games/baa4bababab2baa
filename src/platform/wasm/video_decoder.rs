@@ -6,8 +6,8 @@ use crate::{
     error::Error,
     traits::{VideoDecoderInput, VideoDecoderOutput},
     types::{
-        Dimensions, EncodedVideoPacket, HardwareBuffer, PixelFormat, VideoDecoderConfig,
-        VideoFrame, VideoOutputMode, VideoPlanes, video::HardwareBufferInner,
+        Dimensions, EncodedVideoPacket, HardwareBuffer, PixelFormat, VideoColorInfo,
+        VideoDecoderConfig, VideoFrame, VideoOutputMode, VideoPlanes, video::HardwareBufferInner,
     },
 };
 
@@ -52,6 +52,7 @@ fn to_our_frame_hw(f: wasodecs::VideoFrame) -> VideoFrame {
         dimensions: Dimensions::new(dims.width, dims.height),
         format: fmt,
         timestamp: ts,
+        color: None,
         planes: VideoPlanes::Hardware(HardwareBuffer {
             inner: HardwareBufferInner::WebCodecs(f),
         }),
@@ -73,6 +74,7 @@ async fn to_our_frame_copied(f: wasodecs::VideoFrame) -> Result<VideoFrame, Erro
         dimensions: Dimensions::new(dims.width, dims.height),
         format: fmt,
         timestamp: ts,
+        color: None,
         planes: VideoPlanes::Cpu(data),
     })
 }
@@ -108,6 +110,14 @@ impl VideoDecoderInput for WasmVideoDecoderInput {
 pub struct WasmVideoDecoderOutput {
     inner: VideoDecoded,
     output_mode: VideoOutputMode,
+    /// Echoed onto every frame handed back; see [`VideoDecoderConfig::color`].
+    color: Option<VideoColorInfo>,
+}
+
+impl WasmVideoDecoderOutput {
+    fn stamp(&self, frame: &mut VideoFrame) {
+        frame.color = self.color;
+    }
 }
 
 impl VideoDecoderOutput for WasmVideoDecoderOutput {
@@ -117,10 +127,14 @@ impl VideoDecoderOutput for WasmVideoDecoderOutput {
             other => Error::Platform(format!("{other:?}")),
         })?;
         match frame {
-            Some(f) => match self.output_mode {
-                VideoOutputMode::Cpu => Ok(Some(to_our_frame_copied(f).await?)),
-                _ => Ok(Some(to_our_frame_hw(f))),
-            },
+            Some(f) => {
+                let mut out = match self.output_mode {
+                    VideoOutputMode::Cpu => to_our_frame_copied(f).await?,
+                    _ => to_our_frame_hw(f),
+                };
+                self.stamp(&mut out);
+                Ok(Some(out))
+            }
             None => Ok(None),
         }
     }
@@ -136,7 +150,11 @@ impl VideoDecoderOutput for WasmVideoDecoderOutput {
                     wasodecs::Error::Dropped => Error::Dropped,
                     other => Error::Platform(format!("{other:?}")),
                 })?;
-                Ok(frame.map(to_our_frame_hw))
+                Ok(frame.map(|f| {
+                    let mut out = to_our_frame_hw(f);
+                    self.stamp(&mut out);
+                    out
+                }))
             }
         }
     }
@@ -162,6 +180,7 @@ pub fn create(
 
     let try_hw = config.hardware_acceleration;
     let output_mode = config.output_mode;
+    let color = config.color;
 
     let hw_passes: &[Option<bool>] = match try_hw {
         Some(false) => &[Some(false)],
@@ -182,6 +201,7 @@ pub fn create(
                         WasmVideoDecoderOutput {
                             inner: decoded,
                             output_mode,
+                            color,
                         },
                     ));
                 }

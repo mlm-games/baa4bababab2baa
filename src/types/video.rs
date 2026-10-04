@@ -217,6 +217,35 @@ pub enum VideoColorSpace {
     Bt2020,
 }
 
+/// Colour signalling carried in an elementary-stream `video_signal_type()`
+/// block, as raw ITU-T H.273 code points.
+///
+/// Platform decoders surface no colour of their own — MediaCodec,
+/// WebCodecs and VideoToolbox all discard it — so the caller reads it
+/// from the bitstream and passes it in via
+/// [`VideoDecoderConfig::color`]. This type only carries codes; it
+/// performs no interpretation, so an unrecognised code stays a `u8`
+/// rather than collapsing into a fallback.
+///
+/// H.264 §E.3.1 and H.265 §E.3.1 make each field independently optional:
+/// `video_full_range_flag` precedes and does not depend on
+/// `colour_description_present_flag`. Use [`CICP_UNSPECIFIED`] for a field
+/// the stream leaves out, and `signalled: false` when there was no
+/// `video_signal_type()` block at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VideoColorInfo {
+    pub primaries: u8,
+    pub transfer: u8,
+    pub matrix: u8,
+    pub full_range: bool,
+    /// Whether a `video_signal_type()` block was present. `false` means no
+    /// colour was read and consumers should apply their own fallback.
+    pub signalled: bool,
+}
+
+/// H.273 "unspecified" code point, for fields a stream does not signal.
+pub const CICP_UNSPECIFIED: u8 = 2;
+
 #[derive(Debug, Clone)]
 pub struct VideoEncoderConfig {
     pub codec: VideoCodecId,
@@ -278,6 +307,15 @@ pub struct VideoDecoderConfig {
     pub description_format: Option<VideoDescriptionFormat>,
     pub hardware_acceleration: Option<bool>,
     pub output_mode: VideoOutputMode,
+    /// Colour signalling read from the bitstream by the caller, echoed back
+    /// on every [`VideoFrame`] this decoder produces.
+    ///
+    /// `None` means the caller had no colour to report, either because the
+    /// stream signals none or because it never looked. Leaving it `None` is
+    /// correct for streams that genuinely carry no `video_signal_type`;
+    /// consumers that need a matrix regardless should substitute their own
+    /// documented fallback.
+    pub color: Option<VideoColorInfo>,
 }
 
 impl Default for VideoDecoderConfig {
@@ -292,6 +330,7 @@ impl Default for VideoDecoderConfig {
             description_format: None,
             hardware_acceleration: Some(true),
             output_mode: VideoOutputMode::PreferHardware,
+            color: None,
         }
     }
 }
@@ -309,6 +348,10 @@ pub struct VideoFrame {
     pub format: PixelFormat,
     pub timestamp: Timestamp,
     pub planes: VideoPlanes,
+    /// Colour signalling from [`VideoDecoderConfig::color`]. Constant for the
+    /// lifetime of the decoder, so it can be sampled once at init rather than
+    /// per frame.
+    pub color: Option<VideoColorInfo>,
 }
 
 #[derive(Debug)]

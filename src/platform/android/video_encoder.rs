@@ -318,6 +318,9 @@ fn drain_encoded_output(
                                 description_format: None,
                                 hardware_acceleration: None,
                                 output_mode: VideoOutputMode::Cpu,
+                                // Encoder output carries no colour signalling
+                                // for a downstream decoder to recover.
+                                color: None,
                             });
                         }
                     }
