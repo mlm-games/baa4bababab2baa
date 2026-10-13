@@ -511,42 +511,46 @@ fn cpu_path_cached<F: CcVideoFrame + 'static>(
     va_display: &Arc<libva::Display>,
     readback_mode: &mut Option<CpuReadbackMode>,
 ) -> Result<VideoFrame, Error> {
-    match fmt {
-        DecodedFormat::I010 | DecodedFormat::I210 | DecodedFormat::I410 => {
-            p010_frame_to_i010(frame, ts).map_err(Error::from)
-        }
-        _ => match *readback_mode {
-            // Direct mapping already failed once for this stream: go straight
-            // to the VA-API image download without retrying or re-logging.
-            Some(CpuReadbackMode::VaApiDownload) => {
+    let ten_bit = matches!(
+        fmt,
+        DecodedFormat::I010 | DecodedFormat::I210 | DecodedFormat::I410
+    );
+    match *readback_mode {
+        Some(CpuReadbackMode::VaApiDownload) => {
+            if ten_bit {
+                p010_frame_to_i010_via_vaapi(frame, ts, va_display)
+            } else {
                 nv12_frame_to_i420_via_vaapi(frame, ts, va_display)
             }
-            // Direct mapping is known good (or not yet probed): try it first.
-            Some(CpuReadbackMode::DirectMap) | None => {
-                match nv12_frame_to_i420(frame, ts) {
-                    Ok(out) => {
-                        *readback_mode = Some(CpuReadbackMode::DirectMap);
-                        Ok(out)
-                    }
-                    // Probe failed with a permanently unsupported layout: pin
-                    // the VA-API download path for the rest of the stream,
-                    // warn once, and deliver this frame via the fallback. only
-                    // a double failure falls back to software. Any other
-                    // mapping failure surfaces immediately.
-                    Err(FrameMapError::UnsupportedModifier(_))
-                    | Err(FrameMapError::UnsupportedTiling(_))
-                        if readback_mode.is_none() =>
-                    {
-                        eprintln!(
-                            "[VAAPI] Direct surface mapping unavailable; using VA-API image download for this stream"
-                        );
-                        *readback_mode = Some(CpuReadbackMode::VaApiDownload);
+        }
+        Some(CpuReadbackMode::DirectMap) | None => {
+            let direct = if ten_bit {
+                p010_frame_to_i010(frame, ts)
+            } else {
+                nv12_frame_to_i420(frame, ts)
+            };
+            match direct {
+                Ok(out) => {
+                    *readback_mode = Some(CpuReadbackMode::DirectMap);
+                    Ok(out)
+                }
+                Err(FrameMapError::UnsupportedModifier(_))
+                | Err(FrameMapError::UnsupportedTiling(_))
+                    if readback_mode.is_none() =>
+                {
+                    eprintln!(
+                        "[VAAPI] Direct surface mapping unavailable; using VA-API image download for this stream"
+                    );
+                    *readback_mode = Some(CpuReadbackMode::VaApiDownload);
+                    if ten_bit {
+                        p010_frame_to_i010_via_vaapi(frame, ts, va_display)
+                    } else {
                         nv12_frame_to_i420_via_vaapi(frame, ts, va_display)
                     }
-                    Err(error) => Err(Error::Platform(error.to_string())),
                 }
+                Err(error) => Err(Error::Platform(error.to_string())),
             }
-        },
+        }
     }
 }
 
@@ -815,6 +819,85 @@ fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(
         width,
         height,
     );
+
+    Ok(VideoFrame {
+        dimensions: Dimensions {
+            width: res.width,
+            height: res.height,
+        },
+        format: PixelFormat::Yuv420p,
+        timestamp,
+        color: None,
+        planes: VideoPlanes::Cpu(data),
+    })
+}
+
+fn p010_frame_to_i010_via_vaapi<F: 'static + CcVideoFrame>(
+    frame: &F,
+    timestamp: Timestamp,
+    display: &Arc<libva::Display>,
+) -> Result<VideoFrame, Error> {
+    let gdma = (frame as &dyn std::any::Any)
+        .downcast_ref::<GenericDmaVideoFrame>()
+        .ok_or_else(|| Error::Platform("not a GenericDmaVideoFrame".into()))?;
+
+    let res = gdma.resolution();
+    let width = res.width as usize;
+    let height = res.height as usize;
+
+    let luma_size = res.get_area();
+    let chroma_size =
+        align_up(width as u32, 2) as usize / 2 * (align_up(height as u32, 2) as usize / 2);
+    let mut data = vec![0u8; luma_size + 2 * chroma_size];
+    let (dst_y, dst_uv) = data.split_at_mut(luma_size);
+    let (dst_u, dst_v) = dst_uv.split_at_mut(chroma_size);
+
+    let surface = gdma.to_native_handle(display).map_err(|e| {
+        let msg = format!("to_native_handle for VA-API readback: {e}");
+        eprintln!("[VAAPI] {msg}");
+        Error::Platform(msg)
+    })?;
+
+    let mut format: libva::VAImageFormat = unsafe { std::mem::zeroed() };
+    format.fourcc = u32::from(Fourcc::from(b"P010"));
+    let image = libva::Image::create_from(
+        &surface,
+        format,
+        (res.width, res.height),
+        (res.width, res.height),
+    )
+    .map_err(|e| {
+        let msg = format!("P010 Image::create_from: {e:?}");
+        eprintln!("[VAAPI] {msg}");
+        Error::Platform(msg)
+    })?;
+
+    let va_image = image.image();
+    let y_stride = va_image.pitches[0] as usize;
+    let uv_stride = va_image.pitches[1] as usize;
+    let y_off = va_image.offsets[0] as usize;
+    let uv_off = va_image.offsets[1] as usize;
+    let raw = image.as_ref();
+
+    let chroma_h = align_up(height as u32, 2) as usize / 2;
+    if y_off + y_stride * height > raw.len() || uv_off + uv_stride * chroma_h > raw.len() {
+        return Err(Error::Platform("derived image data too small".into()));
+    }
+
+    for y in 0..height {
+        let row = &raw[y_off + y * y_stride..y_off + y * y_stride + width * 2];
+        for x in 0..width {
+            dst_y[y * width + x] = row[x * 2 + 1];
+        }
+    }
+    let chroma_w = align_up(width as u32, 2) as usize;
+    for y in 0..chroma_h {
+        let row = &raw[uv_off + y * uv_stride..uv_off + y * uv_stride + chroma_w * 2];
+        for x in 0..chroma_w / 2 {
+            dst_u[y * (chroma_w / 2) + x] = row[x * 4 + 1];
+            dst_v[y * (chroma_w / 2) + x] = row[x * 4 + 3];
+        }
+    }
 
     Ok(VideoFrame {
         dimensions: Dimensions {
