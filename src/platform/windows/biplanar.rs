@@ -25,11 +25,7 @@ fn row(plane: &[u8], stride: usize, y: usize, x: usize, len: usize) -> Result<&[
 
 /// Copy the picture at `crop` (x, y, width, height in luma samples) out of `src` into a tight
 /// I420 buffer. `bits` is 8 (NV12) or 10 (P010; samples are shifted down from the high bits).
-pub fn to_i420(
-    src: &Biplanar,
-    crop: (u32, u32, u32, u32),
-    bits: u32,
-) -> Result<Vec<u8>, String> {
+pub fn to_i420(src: &Biplanar, crop: (u32, u32, u32, u32), bits: u32) -> Result<Vec<u8>, String> {
     let (cx, cy, w, h) = crop;
     let (ox, oy, w, h) = (cx as usize, cy as usize, w as usize, h as usize);
     if w == 0 || h == 0 || !matches!(bits, 8 | 10) {
@@ -59,7 +55,9 @@ pub fn to_i420(
             dst_y[y * w..y * w + w].copy_from_slice(row(src.luma, src.stride, oy + y, ox, w)?);
         }
         for y in 0..ch {
-            let pairs = row(src.chroma, src.stride, coy + y, cox * 2, cw * 2)?.as_chunks::<2>().0;
+            let pairs = row(src.chroma, src.stride, coy + y, cox * 2, cw * 2)?
+                .as_chunks::<2>()
+                .0;
             let u_row = &mut dst_u[y * cw..y * cw + cw];
             let v_row = &mut dst_v[y * cw..y * cw + cw];
             for (x, p) in pairs.iter().enumerate() {
@@ -78,7 +76,9 @@ pub fn to_i420(
             }
         }
         for y in 0..ch {
-            let quads = row(src.chroma, src.stride, coy + y, cox * 4, cw * 4)?.as_chunks::<4>().0;
+            let quads = row(src.chroma, src.stride, coy + y, cox * 4, cw * 4)?
+                .as_chunks::<4>()
+                .0;
             let u_row = &mut dst_u[y * cw..y * cw + cw];
             let v_row = &mut dst_v[y * cw..y * cw + cw];
             for (x, q) in quads.iter().enumerate() {

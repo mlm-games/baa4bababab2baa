@@ -453,7 +453,10 @@ fn select_readback_image(display: &libva::Display, ten_bit: bool) -> Option<(u32
     };
     candidates.iter().find_map(|(fourcc, unpack)| {
         let wanted = u32::from(Fourcc::from(*fourcc));
-        formats.iter().find(|f| f.fourcc == wanted).map(|f| (f.fourcc, *unpack))
+        formats
+            .iter()
+            .find(|f| f.fourcc == wanted)
+            .map(|f| (f.fourcc, *unpack))
     })
 }
 
@@ -514,13 +517,9 @@ fn drain_events<F: CcVideoFrame + 'static>(
                             Err(e) => return Err(e),
                         }
                     }
-                    VideoOutputMode::Cpu => cpu_path_cached(
-                        &*frame_arc,
-                        ts,
-                        *cached_format,
-                        va_display,
-                        readback_mode,
-                    )?,
+                    VideoOutputMode::Cpu => {
+                        cpu_path_cached(&*frame_arc, ts, *cached_format, va_display, readback_mode)?
+                    }
                 };
                 frame_tx.send(Ok(out)).map_err(|_| Error::Dropped)?;
                 count += 1;
@@ -552,9 +551,10 @@ fn cpu_path_cached<F: CcVideoFrame + 'static>(
         DecodedFormat::I010 | DecodedFormat::I210 | DecodedFormat::I410
     );
     match *readback_mode {
-        Some(CpuReadbackMode::VaApiDownload { image_fourcc, unpack }) => {
-            vaapi_download(frame, ts, va_display, image_fourcc, unpack)
-        }
+        Some(CpuReadbackMode::VaApiDownload {
+            image_fourcc,
+            unpack,
+        }) => vaapi_download(frame, ts, va_display, image_fourcc, unpack),
         Some(CpuReadbackMode::DirectMap) | None => {
             let direct = if ten_bit {
                 p010_frame_to_i010(frame, ts)
@@ -585,7 +585,10 @@ fn cpu_path_cached<F: CcVideoFrame + 'static>(
                     eprintln!(
                         "[VAAPI] Direct surface mapping unavailable; using VA-API image download ({image_fourcc:#x})"
                     );
-                    *readback_mode = Some(CpuReadbackMode::VaApiDownload { image_fourcc, unpack });
+                    *readback_mode = Some(CpuReadbackMode::VaApiDownload {
+                        image_fourcc,
+                        unpack,
+                    });
                     vaapi_download(frame, ts, va_display, image_fourcc, unpack)
                 }
                 Err(error) => Err(Error::Platform(error.to_string())),
@@ -879,13 +882,12 @@ fn unpack_va_image(
 
     let luma_bytes = pitches[0] as usize * height;
     let chroma_bytes = pitches[1] as usize * chroma_h;
-    if offsets[0] as usize + luma_bytes > raw.len() || offsets[1] as usize + chroma_bytes > raw.len()
+    if offsets[0] as usize + luma_bytes > raw.len()
+        || offsets[1] as usize + chroma_bytes > raw.len()
     {
         return Err(Error::Platform("VA image data too small".into()));
     }
-    if planar_chroma
-        && offsets[2] as usize + pitches[2] as usize * chroma_h > raw.len()
-    {
+    if planar_chroma && offsets[2] as usize + pitches[2] as usize * chroma_h > raw.len() {
         return Err(Error::Platform("VA image V plane too small".into()));
     }
 

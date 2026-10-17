@@ -1,6 +1,4 @@
-use wasodecs::{
-    AudioData, AudioEncoded, AudioEncoder, AudioEncoderConfig as WcAudioEncoderConfig,
-};
+use wasodecs::{AudioData, AudioEncoded, AudioEncoder, AudioEncoderConfig as WcAudioEncoderConfig};
 
 use crate::{
     error::Error,

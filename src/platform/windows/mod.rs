@@ -289,10 +289,15 @@ impl Decoder {
     }
 
     /// One picture from the decoder's output sample, as a tight I420 frame.
-    fn picture(&mut self, config: &VideoDecoderConfig, sample: &windows::Win32::Media::MediaFoundation::IMFSample, time: i64) -> Result<(i64, Vec<u8>), Error> {
-        let dimensions = config.resolution.ok_or_else(|| {
-            Error::InvalidConfig("decoder needs a resolution".into())
-        })?;
+    fn picture(
+        &mut self,
+        config: &VideoDecoderConfig,
+        sample: &windows::Win32::Media::MediaFoundation::IMFSample,
+        time: i64,
+    ) -> Result<(i64, Vec<u8>), Error> {
+        let dimensions = config
+            .resolution
+            .ok_or_else(|| Error::InvalidConfig("decoder needs a resolution".into()))?;
         let crop = (0, 0, dimensions.width, dimensions.height);
         let bits = self.format.bits();
         let data = self
@@ -322,9 +327,7 @@ impl Decoder {
                 Err(e) => return Err(Error::Platform(e)),
             }
         }
-        Err(Error::Platform(
-            "the decoder keeps producing output".into(),
-        ))
+        Err(Error::Platform("the decoder keeps producing output".into()))
     }
 
     fn feed(

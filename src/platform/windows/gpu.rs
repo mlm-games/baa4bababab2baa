@@ -132,7 +132,9 @@ impl Gpu {
             )
         }
         .map_err(|e| format!("no Direct3D 11 video device: {e}"))?;
-        let (device, context) = device.zip(context).ok_or("Direct3D 11 returned no device")?;
+        let (device, context) = device
+            .zip(context)
+            .ok_or("Direct3D 11 returned no device")?;
         // Decoder MFTs on other threads use this device while we copy surfaces out of it.
         let mt: ID3D11Multithread = device
             .cast()
@@ -157,7 +159,8 @@ impl Gpu {
 
     fn usable(&self) -> bool {
         // SAFETY: a plain COM call on a live interface.
-        !self.lost.load(Ordering::Relaxed) && unsafe { self.device.GetDeviceRemovedReason() }.is_ok()
+        !self.lost.load(Ordering::Relaxed)
+            && unsafe { self.device.GetDeviceRemovedReason() }.is_ok()
     }
 
     /// The adapter's description (for logs).
@@ -321,7 +324,9 @@ impl Readback {
             let stride = mapped.RowPitch as usize;
             let rows = desc.Height as usize;
             let luma_len = stride.checked_mul(rows).ok_or("surface size overflows")?;
-            let chroma_len = stride.checked_mul(rows.div_ceil(2)).ok_or("surface size overflows")?;
+            let chroma_len = stride
+                .checked_mul(rows.div_ceil(2))
+                .ok_or("surface size overflows")?;
             if mapped.pData.is_null() || stride == 0 {
                 return Err("the decoded surface is not mapped".to_string());
             }
@@ -347,10 +352,9 @@ impl Readback {
         gpu: &Gpu,
         src: &D3D11_TEXTURE2D_DESC,
     ) -> Result<&ID3D11Texture2D, String> {
-        let fits = self
-            .staging
-            .as_ref()
-            .is_some_and(|(_, d)| d.Width == src.Width && d.Height == src.Height && d.Format == src.Format);
+        let fits = self.staging.as_ref().is_some_and(|(_, d)| {
+            d.Width == src.Width && d.Height == src.Height && d.Format == src.Format
+        });
         if !fits {
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: src.Width,

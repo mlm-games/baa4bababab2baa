@@ -172,8 +172,7 @@ pub fn create(
             None => {
                 let csd_first: Vec<u8> = desc.iter().take(8).copied().collect();
                 let looks_annexb = desc.len() >= 4
-                    && (desc[..4] == [0x00, 0x00, 0x00, 0x01]
-                        || desc[..3] == [0x00, 0x00, 0x01]);
+                    && (desc[..4] == [0x00, 0x00, 0x00, 0x01] || desc[..3] == [0x00, 0x00, 0x01]);
                 debug!(
                     "decoder csd-0: {} bytes (format undeclared), first={:02x?}, looks_annexb={}",
                     desc.len(),
@@ -215,7 +214,10 @@ pub fn create(
         .start()
         .map_err(|e| Error::Platform(format!("{e:?}")))?;
 
-    log::warn!("decoder started: mime={mime} output_mode={:?}", config.output_mode);
+    log::warn!(
+        "decoder started: mime={mime} output_mode={:?}",
+        config.output_mode
+    );
 
     // Flushing a codec that has signalled end-of-stream is unreliable on some
     // devices: rebuild the instance on flush instead. Keep the inputs needed
@@ -272,14 +274,8 @@ fn output_to_frame(out_buf: &anodecs::CodecOutputBuffer) -> Result<VideoFrame, E
     let fmt_w = fmt.get_i32("width").unwrap_or(0).max(0) as u32;
     let fmt_h = fmt.get_i32("height").unwrap_or(0).max(0) as u32;
 
-    let (vis_w, vis_h) = repack::resolve_visible(
-        crop_left,
-        crop_top,
-        crop_right,
-        crop_bottom,
-        fmt_w,
-        fmt_h,
-    )?;
+    let (vis_w, vis_h) =
+        repack::resolve_visible(crop_left, crop_top, crop_right, crop_bottom, fmt_w, fmt_h)?;
 
     // Per the MediaCodec docs slice-height may be advertised as 0, meaning
     // "same as frame height OR height aligned up (usually pow2)" — there is

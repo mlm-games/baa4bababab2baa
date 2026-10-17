@@ -19,16 +19,19 @@ use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaType, IMFSample, IMFTransform,
     MF_E_NO_MORE_TYPES, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
     MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-    MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC, MF_VERSION,
-    MFMediaType_Video, MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_ASYNCMFT,
-    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
-    MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFT_REGISTER_TYPE_INFO, MFVideoFormat_NV12, MFVideoFormat_P010, MFVideoInterlace_Progressive,
+    MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC,
+    MF_VERSION, MFMediaType_Video, MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG,
+    MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+    MFT_ENUM_FLAG_SYNCMFT, MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN,
+    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFVideoFormat_NV12,
+    MFVideoFormat_P010, MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
+use windows::Win32::System::LibraryLoader::{
+    GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+};
 use windows::core::{GUID, HRESULT, Interface, PCSTR, w};
 
 use super::gpu::{Gpu, SurfaceFormat, ensure_com};
@@ -92,8 +95,14 @@ fn load() -> Result<MfApi, String> {
             MfApi {
                 create_media_type: symbol(module, PCSTR(c"MFCreateMediaType".as_ptr().cast()))?,
                 create_sample: symbol(module, PCSTR(c"MFCreateSample".as_ptr().cast()))?,
-                create_memory_buffer: symbol(module, PCSTR(c"MFCreateMemoryBuffer".as_ptr().cast()))?,
-                create_manager: symbol(module, PCSTR(c"MFCreateDXGIDeviceManager".as_ptr().cast()))?,
+                create_memory_buffer: symbol(
+                    module,
+                    PCSTR(c"MFCreateMemoryBuffer".as_ptr().cast()),
+                )?,
+                create_manager: symbol(
+                    module,
+                    PCSTR(c"MFCreateDXGIDeviceManager".as_ptr().cast()),
+                )?,
                 enum_transforms: symbol(module, PCSTR(c"MFTEnumEx".as_ptr().cast()))?,
             },
         )
@@ -293,8 +302,8 @@ impl Mft {
         let (size, format) = (spec.size, spec.format);
         let name = friendly_name(activate).unwrap_or_else(|| "a decoder MFT".into());
         // SAFETY: plain COM calls on live interfaces.
-        let transform: IMFTransform =
-            unsafe { activate.ActivateObject() }.map_err(|e| format!("{name}: cannot be created: {e}"))?;
+        let transform: IMFTransform = unsafe { activate.ActivateObject() }
+            .map_err(|e| format!("{name}: cannot be created: {e}"))?;
         // SAFETY: plain COM calls on live interfaces; the D3D manager parameter is a pointer to
         // the device manager, kept alive by `gpu` (which every decoder holds an `Arc` of).
         unsafe {
@@ -302,7 +311,9 @@ impl Mft {
                 .GetAttributes()
                 .map_err(|e| format!("{name}: no attributes: {e}"))?;
             if attrs.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) != 0 {
-                return Err(format!("{name}: asynchronous decoder MFTs are not supported"));
+                return Err(format!(
+                    "{name}: asynchronous decoder MFTs are not supported"
+                ));
             }
             if attrs.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) == 0 {
                 return Err(format!("{name}: does not decode on Direct3D 11"));
@@ -353,7 +364,10 @@ impl Mft {
                 .GetOutputStreamInfo(0)
                 .map_err(|e| format!("{}: no output stream info: {e}", mft.name))?;
             if info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 == 0 {
-                return Err(format!("{}: does not provide Direct3D output samples", mft.name));
+                return Err(format!(
+                    "{}: does not provide Direct3D output samples",
+                    mft.name
+                ));
             }
             mft.transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
@@ -400,7 +414,8 @@ impl Mft {
             let t = self.transform.GetOutputCurrentType(0).ok()?;
             let mut area = [0u8; 16];
             let mut len = 0u32;
-            if t.GetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, &mut area, Some(&mut len)).is_ok()
+            if t.GetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, &mut area, Some(&mut len))
+                .is_ok()
                 && len == 16
             {
                 let cx = i32::from_le_bytes([area[8], area[9], area[10], area[11]]);
