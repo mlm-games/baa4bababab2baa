@@ -1,6 +1,6 @@
 [package]
 name = "baabaabaabaabababbababbaa"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "Cross-platform hardware-accelerated video/audio codecs (WebCodecs, MediaCodec, VAAPI, VideoToolbox)"
 license = "MPL-2.0"
@@ -28,7 +28,7 @@ nuxodecs = { version = "0.1", optional = true, default-features = false }
 
 [target.'cfg(target_os = "android")'.dependencies]
 log = "0.4"
-anodecs = { version = "0.1" }
+anodecs = { version = "0.1.12" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = [

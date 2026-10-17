@@ -30,9 +30,9 @@ dependencies = [
 
 [[package]]
 name = "anodecs"
-version = "0.1.11"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8b4a94a197682343e504a160d4a94a43966461498e3576ebfb8128a6cb729ae"
+checksum = "a59d496004e4366222d2751956ef8f61e4e00837a7e7f5fe5d7b1d9e9bbc51e6"
 dependencies = [
  "android_logger",
  "jni",
@@ -48,7 +48,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "baabaabaabaabababbababbaa"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anodecs",
  "bytes",
