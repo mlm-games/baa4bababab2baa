@@ -232,6 +232,11 @@ impl MfApi {
     }
 }
 
+/// Whether any decoder MFT on this machine takes `subtype` (UI capability probe).
+pub fn has_decoder(api: &MfApi, subtype: GUID) -> bool {
+    api.decoders(subtype).is_ok_and(|list| !list.is_empty())
+}
+
 /// What polling the decoder for output produced.
 pub enum Poll {
     /// A decoded picture and its timestamp (100 ns units).

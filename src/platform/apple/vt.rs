@@ -50,6 +50,16 @@ fn is_ox_need_more_or_eof(e: &OxError) -> bool {
     matches!(e, OxError::NeedMore | OxError::Eof)
 }
 
+/// VideoToolbox is present on every macOS; hardware decoding depends on the Mac and the codec,
+/// and the decoder declines per stream (with the software decoder taking over), so this is the
+/// capability answer for the UI.
+pub fn probe() -> Result<(String, Vec<String>), String> {
+    Ok((
+        "VideoToolbox (hardware decoding, per-stream fallback)".to_string(),
+        vec!["H.264".to_string(), "HEVC".to_string()],
+    ))
+}
+
 pub struct VideoToolboxHost;
 
 impl VideoToolboxHost {

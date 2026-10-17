@@ -15,7 +15,7 @@ mod gpu;
 mod mft;
 
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use std::thread;
@@ -450,6 +450,26 @@ fn send_frames(
         frame_tx.send(Ok(frame)).map_err(|_| Error::Dropped)?;
     }
     Ok(())
+}
+
+/// The Direct3D 11 adapter and the codecs Media Foundation decodes on it: the process's
+/// capability answer for the UI, probed once.
+pub fn probe() -> Result<(String, Vec<String>), String> {
+    static PROBE: OnceLock<Result<(String, Vec<String>), String>> = OnceLock::new();
+    PROBE
+        .get_or_init(|| {
+            let api = mft::api().map_err(|e| format!("Media Foundation: {e}"))?;
+            let gpu = Gpu::shared(api).map_err(|e| format!("Media Foundation: {e}"))?;
+            let mut codecs = Vec::new();
+            if mft::has_decoder(api, MFVideoFormat_H264) {
+                codecs.push("H.264".to_string());
+            }
+            if mft::has_decoder(api, MFVideoFormat_HEVC) {
+                codecs.push("HEVC".to_string());
+            }
+            Ok((format!("Media Foundation: {}", gpu.name()), codecs))
+        })
+        .clone()
 }
 
 /// The Media Foundation host: what the crate's platform dispatch calls on Windows.
