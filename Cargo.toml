@@ -1,6 +1,6 @@
 [package]
 name = "baabaabaabaabababbababbaa"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 description = "Cross-platform hardware-accelerated video/audio codecs (WebCodecs, MediaCodec, VAAPI, VideoToolbox)"
 license = "MPL-2.0"
@@ -24,7 +24,7 @@ thiserror = "2"
 bytes = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nuxodecs = { version = "0.1", optional = true, default-features = false }
+nuxodecs = { version = "0.1.7", optional = true, default-features = false }
 
 [target.'cfg(target_os = "android")'.dependencies]
 log = "0.4"

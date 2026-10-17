@@ -297,6 +297,8 @@ fn worker_loop(
     // Whether the cheap direct VA surface mapping is known to work for this
     // stream.
     let mut readback_mode: Option<CpuReadbackMode> = None;
+    // The download image, created once per stream and reused for every picture.
+    let mut readback_image: Option<libva::DetachedImage> = None;
 
     let va_display_clone = va_display.clone();
     let mut alloc_frame = move |stream_info: &StreamInfo| -> Result<GenericDmaVideoFrame, Error> {
@@ -340,6 +342,7 @@ fn worker_loop(
                             &mut cached_format,
                             output_mode,
                             &mut readback_mode,
+                            &mut readback_image,
                         )?;
                     }
                     Ok(())
@@ -399,6 +402,7 @@ fn worker_loop(
                             &mut cached_format,
                             output_mode,
                             &mut readback_mode,
+                            &mut readback_image,
                         )?;
                     }
 
@@ -473,12 +477,14 @@ fn drain_events<F: CcVideoFrame + 'static>(
     cached_format: &mut nuxodecs::DecodedFormat,
     output_mode: VideoOutputMode,
     readback_mode: &mut Option<CpuReadbackMode>,
+    readback_image: &mut Option<libva::DetachedImage>,
 ) -> Result<usize, Error> {
     let mut count = 0;
     while let Some(ev) = dec.next_event() {
         match ev {
             DecoderEvent::FormatChanged => {
                 if let Some(info) = dec.stream_info() {
+                    *readback_image = None;
                     *cached_w = info.coded_resolution.width;
                     *cached_h = info.coded_resolution.height;
                     *cached_display = info.display_resolution;
@@ -512,14 +518,20 @@ fn drain_events<F: CcVideoFrame + 'static>(
                                     *cached_format,
                                     va_display,
                                     readback_mode,
+                                    readback_image,
                                 )?
                             }
                             Err(e) => return Err(e),
                         }
                     }
-                    VideoOutputMode::Cpu => {
-                        cpu_path_cached(&*frame_arc, ts, *cached_format, va_display, readback_mode)?
-                    }
+                    VideoOutputMode::Cpu => cpu_path_cached(
+                        &*frame_arc,
+                        ts,
+                        *cached_format,
+                        va_display,
+                        readback_mode,
+                        readback_image,
+                    )?,
                 };
                 frame_tx.send(Ok(out)).map_err(|_| Error::Dropped)?;
                 count += 1;
@@ -545,6 +557,7 @@ fn cpu_path_cached<F: CcVideoFrame + 'static>(
     fmt: nuxodecs::DecodedFormat,
     va_display: &Arc<libva::Display>,
     readback_mode: &mut Option<CpuReadbackMode>,
+    readback_image: &mut Option<libva::DetachedImage>,
 ) -> Result<VideoFrame, Error> {
     let ten_bit = matches!(
         fmt,
@@ -554,7 +567,7 @@ fn cpu_path_cached<F: CcVideoFrame + 'static>(
         Some(CpuReadbackMode::VaApiDownload {
             image_fourcc,
             unpack,
-        }) => vaapi_download(frame, ts, va_display, image_fourcc, unpack),
+        }) => vaapi_download(frame, ts, va_display, image_fourcc, unpack, readback_image),
         Some(CpuReadbackMode::DirectMap) | None => {
             let direct = if ten_bit {
                 p010_frame_to_i010(frame, ts)
@@ -589,7 +602,7 @@ fn cpu_path_cached<F: CcVideoFrame + 'static>(
                         image_fourcc,
                         unpack,
                     });
-                    vaapi_download(frame, ts, va_display, image_fourcc, unpack)
+                    vaapi_download(frame, ts, va_display, image_fourcc, unpack, readback_image)
                 }
                 Err(error) => Err(Error::Platform(error.to_string())),
             }
@@ -605,7 +618,8 @@ fn cpu_path<F: CcVideoFrame + 'static>(
     va_display: &Arc<libva::Display>,
 ) -> Result<VideoFrame, Error> {
     let mut mode = None;
-    cpu_path_cached(frame, ts, fmt, va_display, &mut mode)
+    let mut image = None;
+    cpu_path_cached(frame, ts, fmt, va_display, &mut mode, &mut image)
 }
 
 fn gdma_to_hardware<F: CcVideoFrame + 'static>(
@@ -806,6 +820,7 @@ fn vaapi_download<F: 'static + CcVideoFrame>(
     display: &Arc<libva::Display>,
     image_fourcc: u32,
     unpack: CpuUnpack,
+    image: &mut Option<libva::DetachedImage>,
 ) -> Result<VideoFrame, Error> {
     let gdma = (frame as &dyn std::any::Any)
         .downcast_ref::<GenericDmaVideoFrame>()
@@ -821,23 +836,38 @@ fn vaapi_download<F: 'static + CcVideoFrame>(
         Error::Platform(msg)
     })?;
 
-    let mut format: libva::VAImageFormat = unsafe { std::mem::zeroed() };
-    format.fourcc = image_fourcc;
-    let image = libva::Image::create_from(
-        &surface,
-        format,
-        (res.width, res.height),
-        (res.width, res.height),
-    )
-    .map_err(|e| {
-        let msg = format!("Image::create_from({image_fourcc:#x}): {e:?}");
+    // One image per stream: `vaCreateImage` is paid once, every picture is a
+    // `vaGetImage` into it (the mapping is taken only around the copy out).
+    if image.is_none() {
+        let mut format: libva::VAImageFormat = unsafe { std::mem::zeroed() };
+        format.fourcc = image_fourcc;
+        *image = Some(
+            libva::DetachedImage::create(
+                display,
+                format,
+                (res.width, res.height),
+                (res.width, res.height),
+            )
+            .map_err(|e| {
+                let msg = format!("DetachedImage::create({image_fourcc:#x}): {e:?}");
+                eprintln!("[VAAPI] {msg}");
+                Error::Platform(msg)
+            })?,
+        );
+    }
+    let img = image.as_mut().expect("image created above");
+    img.get_from(&surface).map_err(|e| {
+        let msg = format!("vaGetImage: {e:?}");
         eprintln!("[VAAPI] {msg}");
         Error::Platform(msg)
     })?;
-
-    let va_image = image.image();
-    let raw = image.as_ref();
-    let data = unpack_va_image(raw, va_image, unpack, width, height)?;
+    let mapping = img.map().map_err(|e| {
+        let msg = format!("vaMapBuffer for readback: {e:?}");
+        eprintln!("[VAAPI] {msg}");
+        Error::Platform(msg)
+    })?;
+    let data = unpack_va_image(&mapping, img.image(), unpack, width, height)?;
+    drop(mapping);
 
     Ok(VideoFrame {
         dimensions: Dimensions {
