@@ -418,7 +418,43 @@ fn worker_loop(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CpuReadbackMode {
     DirectMap,
-    VaApiDownload,
+    VaApiDownload {
+        /// Fourcc of the VA image the driver creates for downloads.
+        image_fourcc: u32,
+        unpack: CpuUnpack,
+    },
+}
+
+/// Plane layout of the VA image used for CPU downloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpuUnpack {
+    /// NV12: interleaved UV plane, 8-bit samples.
+    Nv12,
+    /// I420: planar U and V planes, 8-bit samples.
+    I420,
+    /// P010: interleaved UV plane, 16-bit little-endian samples; the high
+    /// byte is the 8-bit approximation (same as the direct mapping path).
+    P010,
+    /// I010: planar U and V planes, 16-bit little-endian samples; high byte.
+    I010,
+}
+
+/// Pick the VA image format for CPU downloads the way FFmpeg does in
+/// `vaapi_device_init` (hwcontext_vaapi.c): ask the driver which image formats
+/// it can create and take the first candidate we can unpack, instead of
+/// hardcoding NV12/P010. A driver whose image format list omits the hardcoded
+/// format fails every download even though another listed format would work.
+fn select_readback_image(display: &libva::Display, ten_bit: bool) -> Option<(u32, CpuUnpack)> {
+    let formats = display.query_image_formats().ok()?;
+    let candidates: &[(&[u8; 4], CpuUnpack)] = if ten_bit {
+        &[(b"P010", CpuUnpack::P010), (b"I010", CpuUnpack::I010)]
+    } else {
+        &[(b"NV12", CpuUnpack::Nv12), (b"I420", CpuUnpack::I420)]
+    };
+    candidates.iter().find_map(|(fourcc, unpack)| {
+        let wanted = u32::from(Fourcc::from(*fourcc));
+        formats.iter().find(|f| f.fourcc == wanted).map(|f| (f.fourcc, *unpack))
+    })
 }
 
 fn drain_events<F: CcVideoFrame + 'static>(
@@ -516,12 +552,8 @@ fn cpu_path_cached<F: CcVideoFrame + 'static>(
         DecodedFormat::I010 | DecodedFormat::I210 | DecodedFormat::I410
     );
     match *readback_mode {
-        Some(CpuReadbackMode::VaApiDownload) => {
-            if ten_bit {
-                p010_frame_to_i010_via_vaapi(frame, ts, va_display)
-            } else {
-                nv12_frame_to_i420_via_vaapi(frame, ts, va_display)
-            }
+        Some(CpuReadbackMode::VaApiDownload { image_fourcc, unpack }) => {
+            vaapi_download(frame, ts, va_display, image_fourcc, unpack)
         }
         Some(CpuReadbackMode::DirectMap) | None => {
             let direct = if ten_bit {
@@ -538,15 +570,23 @@ fn cpu_path_cached<F: CcVideoFrame + 'static>(
                 | Err(FrameMapError::UnsupportedTiling(_))
                     if readback_mode.is_none() =>
                 {
+                    // The driver's surface layout cannot be mapped directly.
+                    // Prefer a download format the driver lists; fall back to
+                    // the historical defaults when it lists none of them
+                    // (some drivers accept formats they do not advertise).
+                    let (image_fourcc, unpack) = select_readback_image(va_display, ten_bit)
+                        .unwrap_or_else(|| {
+                            if ten_bit {
+                                (u32::from(Fourcc::from(b"P010")), CpuUnpack::P010)
+                            } else {
+                                (u32::from(Fourcc::from(b"NV12")), CpuUnpack::Nv12)
+                            }
+                        });
                     eprintln!(
-                        "[VAAPI] Direct surface mapping unavailable; using VA-API image download for this stream"
+                        "[VAAPI] Direct surface mapping unavailable; using VA-API image download ({image_fourcc:#x})"
                     );
-                    *readback_mode = Some(CpuReadbackMode::VaApiDownload);
-                    if ten_bit {
-                        p010_frame_to_i010_via_vaapi(frame, ts, va_display)
-                    } else {
-                        nv12_frame_to_i420_via_vaapi(frame, ts, va_display)
-                    }
+                    *readback_mode = Some(CpuReadbackMode::VaApiDownload { image_fourcc, unpack });
+                    vaapi_download(frame, ts, va_display, image_fourcc, unpack)
                 }
                 Err(error) => Err(Error::Platform(error.to_string())),
             }
@@ -751,10 +791,18 @@ fn create_video_frame(
     .map_err(|e| Error::Platform(format!("GenericDmaVideoFrame construction failed: {e:?}")))
 }
 
-fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(
+/// Download one decoded frame through `vaCreateImage`/`vaGetImage` and unpack
+/// the resulting VA image into an I420 CPU frame.
+///
+/// `image_fourcc`/`unpack` come from [`select_readback_image`]. `vaGetImage`
+/// is required to deliver the image in the created format, so the unpacking
+/// follows the requested layout.
+fn vaapi_download<F: 'static + CcVideoFrame>(
     frame: &F,
     timestamp: Timestamp,
     display: &Arc<libva::Display>,
+    image_fourcc: u32,
+    unpack: CpuUnpack,
 ) -> Result<VideoFrame, Error> {
     let gdma = (frame as &dyn std::any::Any)
         .downcast_ref::<GenericDmaVideoFrame>()
@@ -764,13 +812,6 @@ fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(
     let width = res.width as usize;
     let height = res.height as usize;
 
-    let luma_size = res.get_area();
-    let chroma_size =
-        align_up(width as u32, 2) as usize / 2 * (align_up(height as u32, 2) as usize / 2);
-    let mut data = vec![0u8; luma_size + 2 * chroma_size];
-    let (dst_y, dst_uv) = data.split_at_mut(luma_size);
-    let (dst_u, dst_v) = dst_uv.split_at_mut(chroma_size);
-
     let surface = gdma.to_native_handle(display).map_err(|e| {
         let msg = format!("to_native_handle for VA-API readback: {e}");
         eprintln!("[VAAPI] {msg}");
@@ -778,7 +819,7 @@ fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(
     })?;
 
     let mut format: libva::VAImageFormat = unsafe { std::mem::zeroed() };
-    format.fourcc = u32::from(Fourcc::from(b"NV12"));
+    format.fourcc = image_fourcc;
     let image = libva::Image::create_from(
         &surface,
         format,
@@ -786,39 +827,14 @@ fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(
         (res.width, res.height),
     )
     .map_err(|e| {
-        let msg = format!("Image::create_from: {e:?}");
+        let msg = format!("Image::create_from({image_fourcc:#x}): {e:?}");
         eprintln!("[VAAPI] {msg}");
         Error::Platform(msg)
     })?;
 
     let va_image = image.image();
-    let luma_stride = va_image.pitches[0] as usize;
-    let chroma_stride = va_image.pitches[1] as usize;
-    let y_off = va_image.offsets[0] as usize;
-    let uv_off = va_image.offsets[1] as usize;
     let raw = image.as_ref();
-
-    let chroma_height = align_up(height as u32, 2) as usize / 2;
-    if y_off + luma_stride * height > raw.len()
-        || uv_off + chroma_stride * chroma_height > raw.len()
-    {
-        return Err(Error::Platform("derived image data too small".into()));
-    }
-
-    nv12_to_i420(
-        &raw[y_off..],
-        luma_stride,
-        dst_y,
-        width,
-        &raw[uv_off..],
-        chroma_stride,
-        dst_u,
-        align_up(width as u32, 2) as usize / 2,
-        dst_v,
-        align_up(width as u32, 2) as usize / 2,
-        width,
-        height,
-    );
+    let data = unpack_va_image(raw, va_image, unpack, width, height)?;
 
     Ok(VideoFrame {
         dimensions: Dimensions {
@@ -832,83 +848,118 @@ fn nv12_frame_to_i420_via_vaapi<F: 'static + CcVideoFrame>(
     })
 }
 
-fn p010_frame_to_i010_via_vaapi<F: 'static + CcVideoFrame>(
-    frame: &F,
-    timestamp: Timestamp,
-    display: &Arc<libva::Display>,
-) -> Result<VideoFrame, Error> {
-    let gdma = (frame as &dyn std::any::Any)
-        .downcast_ref::<GenericDmaVideoFrame>()
-        .ok_or_else(|| Error::Platform("not a GenericDmaVideoFrame".into()))?;
+/// Unpack a VA image in the layout described by `unpack` into I420.
+///
+/// Ten-bit layouts are reduced to the high byte of each 16-bit sample, the
+/// same 8-bit approximation the direct-mapping path uses.
+fn unpack_va_image(
+    raw: &[u8],
+    image: &libva::VAImage,
+    unpack: CpuUnpack,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, Error> {
+    let chroma_w = width.div_ceil(2) * 2;
+    let chroma_h = height.div_ceil(2);
+    let chroma_size = chroma_w / 2 * chroma_h;
 
-    let res = gdma.resolution();
-    let width = res.width as usize;
-    let height = res.height as usize;
+    let offsets = image.offsets;
+    let pitches = image.pitches;
+    let bytes_per_sample = match unpack {
+        CpuUnpack::Nv12 | CpuUnpack::I420 => 1usize,
+        CpuUnpack::P010 | CpuUnpack::I010 => 2usize,
+    };
+    let planar_chroma = matches!(unpack, CpuUnpack::I420 | CpuUnpack::I010);
+    if planar_chroma && (image.num_planes as usize) < 3 {
+        return Err(Error::Platform(format!(
+            "VA image has {} planes, expected 3 for this format",
+            image.num_planes
+        )));
+    }
 
-    let luma_size = res.get_area();
-    let chroma_size =
-        align_up(width as u32, 2) as usize / 2 * (align_up(height as u32, 2) as usize / 2);
-    let mut data = vec![0u8; luma_size + 2 * chroma_size];
-    let (dst_y, dst_uv) = data.split_at_mut(luma_size);
+    let luma_bytes = pitches[0] as usize * height;
+    let chroma_bytes = pitches[1] as usize * chroma_h;
+    if offsets[0] as usize + luma_bytes > raw.len() || offsets[1] as usize + chroma_bytes > raw.len()
+    {
+        return Err(Error::Platform("VA image data too small".into()));
+    }
+    if planar_chroma
+        && offsets[2] as usize + pitches[2] as usize * chroma_h > raw.len()
+    {
+        return Err(Error::Platform("VA image V plane too small".into()));
+    }
+
+    let mut data = vec![0u8; width * height + 2 * chroma_size];
+    let (dst_y, dst_uv) = data.split_at_mut(width * height);
     let (dst_u, dst_v) = dst_uv.split_at_mut(chroma_size);
+    let chroma_row = chroma_w / 2;
 
-    let surface = gdma.to_native_handle(display).map_err(|e| {
-        let msg = format!("to_native_handle for VA-API readback: {e}");
-        eprintln!("[VAAPI] {msg}");
-        Error::Platform(msg)
-    })?;
-
-    let mut format: libva::VAImageFormat = unsafe { std::mem::zeroed() };
-    format.fourcc = u32::from(Fourcc::from(b"P010"));
-    let image = libva::Image::create_from(
-        &surface,
-        format,
-        (res.width, res.height),
-        (res.width, res.height),
-    )
-    .map_err(|e| {
-        let msg = format!("P010 Image::create_from: {e:?}");
-        eprintln!("[VAAPI] {msg}");
-        Error::Platform(msg)
-    })?;
-
-    let va_image = image.image();
-    let y_stride = va_image.pitches[0] as usize;
-    let uv_stride = va_image.pitches[1] as usize;
-    let y_off = va_image.offsets[0] as usize;
-    let uv_off = va_image.offsets[1] as usize;
-    let raw = image.as_ref();
-
-    let chroma_h = align_up(height as u32, 2) as usize / 2;
-    if y_off + y_stride * height > raw.len() || uv_off + uv_stride * chroma_h > raw.len() {
-        return Err(Error::Platform("derived image data too small".into()));
-    }
-
-    for y in 0..height {
-        let row = &raw[y_off + y * y_stride..y_off + y * y_stride + width * 2];
-        for x in 0..width {
-            dst_y[y * width + x] = row[x * 2 + 1];
-        }
-    }
-    let chroma_w = align_up(width as u32, 2) as usize;
-    for y in 0..chroma_h {
-        let row = &raw[uv_off + y * uv_stride..uv_off + y * uv_stride + chroma_w * 2];
-        for x in 0..chroma_w / 2 {
-            dst_u[y * (chroma_w / 2) + x] = row[x * 4 + 1];
-            dst_v[y * (chroma_w / 2) + x] = row[x * 4 + 3];
+    // Luma: one row per line; high byte for 16-bit layouts.
+    let y_plane = &raw[offsets[0] as usize..];
+    for row in 0..height {
+        let src = &y_plane[row * pitches[0] as usize..][..width * bytes_per_sample];
+        let dst = &mut dst_y[row * width..row * width + width];
+        if bytes_per_sample == 1 {
+            dst.copy_from_slice(src);
+        } else {
+            for (x, pixel) in dst.iter_mut().enumerate() {
+                *pixel = src[x * 2 + 1];
+            }
         }
     }
 
-    Ok(VideoFrame {
-        dimensions: Dimensions {
-            width: res.width,
-            height: res.height,
-        },
-        format: PixelFormat::Yuv420p,
-        timestamp,
-        color: None,
-        planes: VideoPlanes::Cpu(data),
-    })
+    match unpack {
+        CpuUnpack::Nv12 => {
+            let uv = &raw[offsets[1] as usize..];
+            for row in 0..chroma_h {
+                let src = &uv[row * pitches[1] as usize..][..chroma_w];
+                let u_row = &mut dst_u[row * chroma_row..][..chroma_row];
+                let v_row = &mut dst_v[row * chroma_row..][..chroma_row];
+                for x in 0..chroma_row {
+                    u_row[x] = src[x * 2];
+                    v_row[x] = src[x * 2 + 1];
+                }
+            }
+        }
+        CpuUnpack::I420 => {
+            let u = &raw[offsets[1] as usize..];
+            let v = &raw[offsets[2] as usize..];
+            for row in 0..chroma_h {
+                dst_u[row * chroma_row..][..chroma_row]
+                    .copy_from_slice(&u[row * pitches[1] as usize..][..chroma_row]);
+                dst_v[row * chroma_row..][..chroma_row]
+                    .copy_from_slice(&v[row * pitches[2] as usize..][..chroma_row]);
+            }
+        }
+        CpuUnpack::P010 => {
+            let uv = &raw[offsets[1] as usize..];
+            for row in 0..chroma_h {
+                let src = &uv[row * pitches[1] as usize..][..chroma_w * 2];
+                let u_row = &mut dst_u[row * chroma_row..][..chroma_row];
+                let v_row = &mut dst_v[row * chroma_row..][..chroma_row];
+                for x in 0..chroma_row {
+                    u_row[x] = src[x * 4 + 1];
+                    v_row[x] = src[x * 4 + 3];
+                }
+            }
+        }
+        CpuUnpack::I010 => {
+            let u = &raw[offsets[1] as usize..];
+            let v = &raw[offsets[2] as usize..];
+            for row in 0..chroma_h {
+                let u_row_src = &u[row * pitches[1] as usize..][..chroma_w * 2];
+                let v_row_src = &v[row * pitches[2] as usize..][..chroma_w * 2];
+                let u_row = &mut dst_u[row * chroma_row..][..chroma_row];
+                let v_row = &mut dst_v[row * chroma_row..][..chroma_row];
+                for x in 0..chroma_row {
+                    u_row[x] = u_row_src[x * 2 + 1];
+                    v_row[x] = v_row_src[x * 2 + 1];
+                }
+            }
+        }
+    }
+
+    Ok(data)
 }
 
 fn p010_frame_to_i010<F: CcVideoFrame>(
