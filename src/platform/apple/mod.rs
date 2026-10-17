@@ -16,7 +16,7 @@ mod vt;
 pub use vt::{
     AppleAudioDecoderInput, AppleAudioDecoderOutput, AppleAudioEncoderInput,
     AppleAudioEncoderOutput, AppleVideoDecoderInput, AppleVideoDecoderOutput,
-    AppleVideoEncoderInput, AppleVideoEncoderOutput, VideoToolboxHost,
+    AppleVideoEncoderInput, AppleVideoEncoderOutput, VideoToolboxHost, probe,
 };
 
 #[cfg(not(target_os = "macos"))]
