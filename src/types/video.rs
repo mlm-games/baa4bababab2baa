@@ -316,6 +316,11 @@ pub struct VideoDecoderConfig {
     /// consumers that need a matrix regardless should substitute their own
     /// documented fallback.
     pub color: Option<VideoColorInfo>,
+    /// Hint that this decoder feeds a real-time sink, trading buffering for
+    /// lower output latency. Honoured by the Android backend (MediaCodec
+    /// low-latency mode) and the WebCodecs backend; the Linux and Apple
+    /// backends ignore it.
+    pub latency_optimized: Option<bool>,
 }
 
 impl Default for VideoDecoderConfig {
@@ -331,6 +336,7 @@ impl Default for VideoDecoderConfig {
             hardware_acceleration: Some(true),
             output_mode: VideoOutputMode::PreferHardware,
             color: None,
+            latency_optimized: None,
         }
     }
 }

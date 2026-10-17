@@ -321,6 +321,7 @@ fn drain_encoded_output(
                                 // Encoder output carries no colour signalling
                                 // for a downstream decoder to recover.
                                 color: None,
+                                latency_optimized: None,
                             });
                         }
                     }

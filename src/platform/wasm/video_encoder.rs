@@ -149,6 +149,7 @@ impl WasmVideoEncoderOutput {
                 // The encoder does not signal colour into the bitstream, so
                 // there is nothing for a downstream decoder to recover here.
                 color: None,
+                latency_optimized: None,
             });
         }
         EncodedVideoPacket {

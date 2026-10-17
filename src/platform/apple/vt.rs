@@ -558,6 +558,7 @@ pub fn create_encoder(
         hardware_acceleration: None,
         output_mode: crate::types::VideoOutputMode::Cpu,
         color: None,
+        latency_optimized: None,
     };
 
     let width = config.dimensions.width;

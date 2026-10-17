@@ -187,6 +187,13 @@ pub fn create(
         }
     }
 
+    if config.latency_optimized == Some(true) {
+        // KEY_LOW_LATENCY: codecs that do not support it ignore the key.
+        // Android only reads it from API 30, so older devices fall back to
+        // normal buffering.
+        let _ = format.set_i32("low-latency", 1);
+    }
+
     log::warn!(
         "decoder format: mime={}, {}x{}, csd-0 present={} csd_len={}",
         config.codec.to_mime(),
@@ -210,6 +217,23 @@ pub fn create(
 
     log::warn!("decoder started: mime={mime} output_mode={:?}", config.output_mode);
 
+    // Flushing a codec that has signalled end-of-stream is unreliable on some
+    // devices: rebuild the instance on flush instead. Keep the inputs needed
+    // to construct a fresh codec.
+    let recreate_mime = mime.clone();
+    let recreate_format = format.clone();
+    let recreate = move || -> Result<MediaCodec, Error> {
+        let mut codec = MediaCodec::create_decoder(&recreate_mime)
+            .map_err(|e| Error::Platform(format!("No decoder for {recreate_mime}: {e:?}")))?;
+        codec
+            .init(&recreate_format, None, 0)
+            .map_err(|e| Error::Platform(format!("{e:?}")))?;
+        codec
+            .start()
+            .map_err(|e| Error::Platform(format!("{e:?}")))?;
+        Ok(codec)
+    };
+
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd<EncodedVideoPacket>>();
     let (frame_tx, frame_rx) = mpsc::unbounded_channel::<Result<VideoFrame, Error>>();
     let queue = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -218,7 +242,7 @@ pub fn create(
     let clean_exit2 = clean_exit.clone();
 
     thread::spawn(move || {
-        decode_loop(codec, cmd_rx, frame_tx, queue2, clean_exit2);
+        decode_loop(codec, cmd_rx, frame_tx, queue2, clean_exit2, recreate);
     });
 
     Ok((
@@ -358,6 +382,14 @@ fn drain_output(
                 if BufferFlag::CodecConfig.is_contained_in(flags) {
                     continue;
                 }
+                // A decode-only frame is a reference picture the codec decodes
+                // but must not present (VP9 alt-refs, AV1 hidden frames).
+                // Forwarding it injects a non-picture with its reference
+                // timing, so drop it and release the buffer without render.
+                if BufferFlag::DecodeOnly.is_contained_in(flags) {
+                    trace!("drain_output: skip decode-only frame");
+                    continue;
+                }
                 match output_to_frame(&out_buf) {
                     Ok(frame) => {
                         static OUT_OK: std::sync::atomic::AtomicU64 =
@@ -408,6 +440,7 @@ fn decode_loop(
     frame_tx: mpsc::UnboundedSender<Result<VideoFrame, Error>>,
     queue: std::sync::Arc<std::sync::atomic::AtomicU32>,
     clean_exit: Arc<AtomicBool>,
+    recreate: impl Fn() -> Result<MediaCodec, Error>,
 ) {
     let mut pending: std::collections::VecDeque<EncodedVideoPacket> =
         std::collections::VecDeque::new();
@@ -424,8 +457,14 @@ fn decode_loop(
                     pending.push_back(pkt);
                 }
                 Some(Cmd::Flush(done)) => {
-                    let res =
-                        handle_flush(&mut codec, &mut pending, &frame_tx, &queue, &mut in_flight);
+                    let res = handle_flush(
+                        &mut codec,
+                        &mut pending,
+                        &frame_tx,
+                        &queue,
+                        &mut in_flight,
+                        &recreate,
+                    );
                     let _ = done.send(res);
                 }
                 Some(Cmd::Close) | None => {
@@ -450,6 +489,7 @@ fn decode_loop(
                             &frame_tx,
                             &queue,
                             &mut in_flight,
+                            &recreate,
                         );
                         let _ = done.send(res);
                     }
@@ -523,6 +563,7 @@ fn handle_flush(
     frame_tx: &mpsc::UnboundedSender<Result<VideoFrame, Error>>,
     queue: &std::sync::Arc<std::sync::atomic::AtomicU32>,
     in_flight: &mut u32,
+    recreate: &dyn Fn() -> Result<MediaCodec, Error>,
 ) -> Result<(), Error> {
     debug!("decode_loop: flush start, pending={}", pending.len());
 
@@ -560,9 +601,10 @@ fn handle_flush(
         frame_tx.send(Ok(frame)).map_err(|_| Error::Dropped)
     })?;
 
-    codec
-        .flush()
-        .map_err(|e| Error::Platform(format!("{e:?}")))?;
+    if let Err(e) = codec.stop() {
+        debug!("decode_loop: stop before recreate returned {e:?}");
+    }
+    *codec = recreate()?;
 
     *in_flight = 0;
     debug!("decode_loop: flush done");

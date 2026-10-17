@@ -27,6 +27,10 @@ pub(super) fn to_wc_config(cfg: &VideoDecoderConfig) -> WcVideoDecoderConfig {
         wc.hardware_acceleration = Some(hw);
     }
 
+    if let Some(lat) = cfg.latency_optimized {
+        wc.latency_optimized = Some(lat);
+    }
+
     wc
 }
 
